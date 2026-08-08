@@ -120,7 +120,7 @@ powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1 -IntervalHour
 
 ### 方式四：GitHub Actions（可选）
 
-仓库自带 `.github/workflows/publish.yml`，支持手动触发；取消 `schedule` 注释后可定时在 GitHub 上跑。注意 **GitHub 出口 IP 容易触发 B 站风控**，成功率不如本机任务，适合作为补充。
+仓库 `docs/publish.yml.example` 提供一份可选 Actions 工作流（手动触发；取消 `schedule` 注释后可定时跑）。如需启用：把该文件复制为 `.github/workflows/publish.yml`，并用**带 `workflow` 权限的 GitHub 凭据（PAT）**推送（普通 OAuth 凭据会被 GitHub 拒绝创建 workflow 文件）。注意 **GitHub 出口 IP 容易触发 B 站风控**，成功率不如本机任务，适合作为补充。
 
 ## 搜索效果
 
