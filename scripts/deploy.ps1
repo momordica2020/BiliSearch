@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 构建索引并把 site/ 发布到 gh-pages 分支（GitHub Pages）。
 
@@ -36,7 +36,7 @@ if (-not (Test-Path (Join-Path $wt ".git"))) {
         git worktree add --detach $wt
         Push-Location $wt
         git switch --orphan gh-pages
-        git rm -rf --quiet .
+        git rm -rf --quiet . 2>$null
         Pop-Location
     }
 }
@@ -59,4 +59,3 @@ Pop-Location
 
 Write-Host "完成。站点目录：$wt"
 if (-not $Push) { Write-Host "加上 -Push 参数即可推送到 $Remote/gh-pages" }
-
