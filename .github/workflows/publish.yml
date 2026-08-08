@@ -1,0 +1,44 @@
+name: Publish site
+# 默认只在手动触发时运行；如需在 GitHub 上定时爬取，取消下面的 schedule 注释。
+# 注意：GitHub Actions 的出口 IP 可能被 B 站风控，成功率不如本机任务。
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "17 1,13 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  crawl-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Crawl & build
+        run: python -m crawler --mode crawl --build --limit 500 --depth 1
+        env:
+          PYTHONUTF8: "1"
+      - name: Commit raw data on main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          git commit -m "data: update $(date -u +%Y-%m-%dT%H:%MZ)" --allow-empty
+          git push origin main
+      - name: Publish site to gh-pages
+        run: |
+          git checkout --orphan gh-pages-build
+          git rm -rf --quiet .
+          cp -r site/* .
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "site: $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -f origin gh-pages-build:gh-pages

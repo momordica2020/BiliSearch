@@ -1,0 +1,392 @@
+"""图式爬虫：从种子（视频/用户/动态/专栏 ID）出发，沿关系边扩展抓取元数据。
+
+关系边：
+    视频 -> 作者（用户）、相关推荐视频
+    用户 -> 投稿视频、动态、专栏
+    动态 -> 引用的视频/专栏、作者
+    专栏 -> 作者
+
+产物：data/raw/{videos,users,dynamics,articles}.jsonl（追加式），
+     data/state.json（cookie/WBI 密钥/去重状态）。
+"""
+
+import argparse
+import json
+import math
+import re
+import sys
+import time
+from collections import deque
+from pathlib import Path
+
+from .bili import BiliClient, BiliError
+
+RAW_FILES = {
+    "video": "videos.jsonl",
+    "user": "users.jsonl",
+    "dynamic": "dynamics.jsonl",
+    "article": "articles.jsonl",
+}
+
+VIDEO_RE = re.compile(r"(BV[0-9A-Za-z]{10}|av\d+)", re.I)
+MID_RE = re.compile(r"(?:mid|uid)\s*[:：]?\s*(\d+)", re.I)
+CV_RE = re.compile(r"(?:cv|read[/_]cv|article[/?]id[=:])(\d+)", re.I)
+DYN_RE = re.compile(r"(?:t\.bilibili\.com[/_])(\d+)", re.I)
+SPACE_RE = re.compile(r"space\.bilibili\.com/(\d+)")
+REL_TIME_RE = re.compile(r"(\d+)\s*(分钟|小时|天|周|月|年)?前")
+
+
+def parse_seed(text):
+    """把一行种子解析成 (type, id)；无法识别返回 None。"""
+    s = text.strip()
+    if not s or s.startswith("#"):
+        return None
+    m = DYN_RE.search(s)
+    if m:
+        return ("dynamic", m.group(1))
+    if SPACE_RE.search(s):
+        return ("user", SPACE_RE.search(s).group(1))
+    m = CV_RE.search(s)
+    if m and ("read" in s or "cv" in s.lower()):
+        return ("article", m.group(1))
+    m = VIDEO_RE.search(s)
+    if m:
+        return ("video", m.group(1))
+    m = MID_RE.search(s)
+    if m:
+        return ("user", m.group(1))
+    m = CV_RE.search(s)
+    if m:
+        return ("article", m.group(1))
+    return None
+
+
+def _clean(s, n=None):
+    if s is None:
+        return ""
+    s = re.sub(r"\s+", " ", str(s)).strip()
+    return s if n is None else s[:n]
+
+
+def _rec(typ, ident, title, author, author_id, desc, url, pubdate=0,
+         category="", **extra):
+    return {
+        "id": ident,
+        "type": typ,
+        "title": _clean(title, 300),
+        "author": _clean(author, 120),
+        "author_id": str(author_id or ""),
+        "desc": _clean(desc, 500),
+        "url": url,
+        "pubdate": int(pubdate or 0),
+        "category": _clean(category, 60),
+        **extra,
+    }
+
+
+def parse_pub_time(pub_time):
+    """把 module_author.pub_time 这类字符串转成 epoch 秒；解析失败返回 0。"""
+    if not pub_time:
+        return 0
+    s = str(pub_time).strip()
+    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})", s)
+    if m:
+        y, mo, d, h, mi = map(int, m.groups())
+        return int(time.mktime((y, mo, d, h, mi, 0, 0, 0, -1)))
+    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        y, mo, d = map(int, m.groups())
+        return int(time.mktime((y, mo, d, 0, 0, 0, 0, 0, -1)))
+    if "刚刚" in s:
+        return int(time.time())
+    m = REL_TIME_RE.search(s)
+    if m:
+        unit = m.group(2) or "分钟"
+        mult = {"分钟": 60, "小时": 3600, "天": 86400, "周": 604800,
+                "月": 2592000, "年": 31536000}[unit]
+        return int(time.time()) - int(m.group(1)) * mult
+    return 0
+
+
+def _owner_of(d):
+    o = d.get("owner") or {}
+    if isinstance(o, dict):
+        return _clean(o.get("name")), o.get("mid")
+    if isinstance(d.get("author"), dict):
+        a = d["author"]
+        return _clean(a.get("name") or a.get("author_name")), a.get("mid")
+    return _clean(d.get("author_name") or d.get("name")), d.get("mid")
+
+
+def dynamic_record(item):
+    """把动态 feed item 转成索引记录 + 邻居。"""
+    mod = item.get("modules") or {}
+    auth = mod.get("module_author") or {}
+    dyn = mod.get("module_dynamic") or {}
+    major = dyn.get("major") or {}
+    desc = _clean((dyn.get("desc") or {}).get("text") or "")
+    id_str = str(item.get("id_str") or "")
+    mtype = major.get("type")
+    title, pub, neigh = "", 0, []
+    if mtype == "MAJOR_TYPE_ARCHIVE":
+        a = major.get("archive") or {}
+        title = _clean(a.get("title"))
+        pub = a.get("pub_date") or a.get("pub_ts") or 0
+        if a.get("bvid"):
+            neigh.append(("video", a["bvid"]))
+    elif mtype == "MAJOR_TYPE_ARTICLE":
+        a = major.get("article") or {}
+        title = _clean(a.get("title"))
+        if a.get("cvid"):
+            neigh.append(("article", "cv" + str(a["cvid"])))
+    elif mtype == "MAJOR_TYPE_DRAW":
+        items = major.get("items") or []
+        title = _clean((items[0] or {}).get("title")) if items else ""
+    elif mtype == "MAJOR_TYPE_OPUS":
+        title = _clean(((major.get("opus") or {}).get("summary") or {}).get("text"), 80)
+    if not title:
+        title = next((ln.strip() for ln in desc.split("\n") if ln.strip()), "")[:60]
+    if not title:
+        title = "转发动态" if "FORWARD" in str(item.get("type") or "") else "动态"
+    if not pub:
+        pub = parse_pub_time(auth.get("pub_time"))
+    name, mid = _clean(auth.get("name")), auth.get("mid")
+    if mid:
+        neigh.append(("user", str(mid)))
+    rec = _rec("dynamic", "dyn:" + id_str, title, name, mid, desc,
+               f"https://t.bilibili.com/{id_str}", pub,
+               category=str(item.get("type") or "").replace("DYNAMIC_TYPE_", ""))
+    return rec, neigh
+
+
+def fetch_item(client, typ, ident, args):
+    """抓取一个实体，返回 (记录, 邻居列表)；失败抛 BiliError。"""
+    if typ == "video":
+        d = client.video(ident)
+        name, mid = _owner_of(d)
+        rec = _rec("video", ident, d.get("title"), name, mid, d.get("desc"),
+                   f"https://www.bilibili.com/video/{ident}", d.get("pubdate"),
+                   d.get("tname"), view=(d.get("stat") or {}).get("view"))
+        neigh = [("user", str(mid))] if mid else []
+        try:
+            for v in client.video_related(ident, args.related):
+                bv = v.get("bvid")
+                if bv:
+                    neigh.append(("video", bv))
+        except BiliError:
+            pass
+        return rec, neigh
+
+    if typ == "user":
+        name, sign = "", ""
+        try:
+            d = client.user(ident)
+            name, sign = d.get("name") or "", d.get("sign") or ""
+        except BiliError:
+            try:
+                d = client.user_card(ident)
+                name, sign = d.get("name") or "", d.get("sign") or ""
+            except BiliError as e:
+                print(f"  [warn] 用户 {ident} 资料获取失败，使用占位名: {e}")
+        if not name:
+            name = f"UID {ident}"
+        rec = _rec("user", "mid:" + str(ident), name, name, ident, sign,
+                   f"https://space.bilibili.com/{ident}", 0, category="UP主")
+        neigh = []
+        try:
+            vlist, total = client.user_videos(ident, 1, args.ps)
+            want = max(0, args.neighbor_videos - len([n for n in neigh if n[0] == "video"]))
+            for v in vlist[:want]:
+                if v.get("bvid"):
+                    neigh.append(("video", v["bvid"]))
+            pages = min(args.user_pages, math.ceil(total / args.ps))
+            for pn in range(2, pages + 1):
+                if len([n for n in neigh if n[0] == "video"]) >= args.neighbor_videos:
+                    break
+                vlist, _ = client.user_videos(ident, pn, args.ps)
+                for v in vlist:
+                    if len([n for n in neigh if n[0] == "video"]) >= args.neighbor_videos:
+                        break
+                    if v.get("bvid"):
+                        neigh.append(("video", v["bvid"]))
+        except BiliError as e:
+            print(f"  [warn] 用户 {ident} 投稿拉取失败: {e}")
+        try:
+            items, has_more, offset = client.user_dynamics(ident)
+            for it in items:
+                if len([n for n in neigh if n[0] == "dynamic"]) >= args.neighbor_dynamics:
+                    break
+                nid = it.get("id_str")
+                if nid:
+                    neigh.append(("dynamic", str(nid)))
+            pages = 0
+            while (len([n for n in neigh if n[0] == "dynamic"]) < args.neighbor_dynamics
+                   and has_more and pages < args.user_pages - 1):
+                items, has_more, offset = client.user_dynamics(ident, offset)
+                for it in items:
+                    if len([n for n in neigh if n[0] == "dynamic"]) >= args.neighbor_dynamics:
+                        break
+                    nid = it.get("id_str")
+                    if nid:
+                        neigh.append(("dynamic", str(nid)))
+                pages += 1
+        except BiliError as e:
+            print(f"  [warn] 用户 {ident} 动态拉取失败: {e}")
+        try:
+            arts, total = client.user_articles(ident, 1, args.ps)
+            for a in arts:
+                if len([n for n in neigh if n[0] == "article"]) >= args.neighbor_articles:
+                    break
+                if a.get("id"):
+                    neigh.append(("article", "cv" + str(a["id"])))
+            pages = min(args.user_pages, math.ceil(total / args.ps))
+            for pn in range(2, pages + 1):
+                if len([n for n in neigh if n[0] == "article"]) >= args.neighbor_articles:
+                    break
+                arts, _ = client.user_articles(ident, pn, args.ps)
+                for a in arts:
+                    if len([n for n in neigh if n[0] == "article"]) >= args.neighbor_articles:
+                        break
+                    if a.get("id"):
+                        neigh.append(("article", "cv" + str(a["id"])))
+        except BiliError as e:
+            print(f"  [warn] 用户 {ident} 专栏拉取失败: {e}")
+        return rec, neigh
+
+    if typ == "dynamic":
+        data = client.dynamic_detail(ident)
+        item = (data.get("item") or {}) if isinstance(data, dict) else {}
+        if not item:
+            raise BiliError(f"动态 {ident} 无详情数据")
+        return dynamic_record(item)
+
+    if typ == "article":
+        d = client.article(ident)
+        name, mid = _owner_of(d)
+        rec = _rec("article", "cv" + str(ident), d.get("title"), name, mid,
+                   d.get("summary") or d.get("desc"), f"https://www.bilibili.com/read/cv{ident}",
+                   d.get("publish_time") or d.get("ctime"), d.get("category"),
+                   view=d.get("view"))
+        neigh = [("user", str(mid))] if mid else []
+        return rec, neigh
+
+    raise BiliError(f"未知类型 {typ}")
+
+
+def load_seeds(args):
+    seeds = []
+    if args.seeds:
+        for line in Path(args.seeds).read_text("utf-8").splitlines():
+            s = parse_seed(line)
+            if s:
+                seeds.append(s)
+    for seed in args.seed or []:
+        s = parse_seed(seed)
+        if s:
+            seeds.append(s)
+    return seeds
+
+
+def run_crawl(args):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    data_dir = Path(args.data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir = data_dir / "raw"
+    raw_dir.mkdir(exist_ok=True)
+    state_path = data_dir / "state.json"
+    state = {}
+    if state_path.exists():
+        state = json.loads(state_path.read_text("utf-8"))
+    if args.cookie and not state.get("cookie_extra"):
+        state["cookie_extra"] = args.cookie
+    client = BiliClient(state, interval=args.interval)
+    seen_state = state.setdefault("seen", {})
+    now = int(time.time())
+    refresh = args.refresh_days * 86400
+
+    seeds = load_seeds(args)
+    if args.add_popular > 0:
+        try:
+            for v in client.popular(1, args.add_popular):
+                if v.get("bvid"):
+                    seeds.append(("video", v["bvid"]))
+            print(f"已从热门视频添加 {len(seeds)} 个种子")
+        except BiliError as e:
+            print(f"[warn] 热门视频获取失败: {e}")
+    if not seeds:
+        print("没有可用种子：请编辑 seeds.txt 或传 --seed/--add-popular")
+        return 1
+
+    out = {}
+    try:
+        for typ, fname in RAW_FILES.items():
+            out[typ] = (raw_dir / fname).open("a", encoding="utf-8")
+        queue = deque((t, i, args.depth) for t, i in seeds)
+        processed = set()
+        stats = {"video": 0, "user": 0, "dynamic": 0, "article": 0}
+        errors = 0
+        while queue and sum(stats.values()) < args.limit:
+            typ, ident, depth = queue.popleft()
+            key = f"{typ}:{ident}"
+            if key in processed:
+                continue
+            processed.add(key)
+            if refresh and key in seen_state and now - int(seen_state[key]) < refresh:
+                continue
+            try:
+                rec, neigh = fetch_item(client, typ, ident, args)
+            except BiliError as e:
+                errors += 1
+                print(f"[skip] {key}: {e}")
+                continue
+            if not rec:
+                continue
+            out[rec["type"]].write(json.dumps(rec, ensure_ascii=False) + "\n")
+            out[rec["type"]].flush()
+            stats[rec["type"]] += 1
+            seen_state[key] = now
+            print(f"[ok] {key} | {rec['title'][:48]} | {rec['url']}")
+            if depth > 0:
+                for nt, nid in neigh:
+                    queue.append((nt, nid, depth - 1))
+        state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
+        print(f"完成：本次新增 {sum(stats.values())} 条 {stats}，错误 {errors}")
+        return 0
+    finally:
+        for f in out.values():
+            f.close()
+
+
+def add_args(parser):
+    parser.add_argument("--data-dir", default="data", help="数据目录（默认 data）")
+    parser.add_argument("--seeds", default="seeds.txt", help="种子文件路径")
+    parser.add_argument("--seed", action="append", default=[], help="追加单条种子，可多次")
+    parser.add_argument("--add-popular", type=int, default=0,
+                        help="先用 N 条热门视频做种子（无种子时引导抓取）")
+    parser.add_argument("--depth", type=int, default=1, help="扩展深度（默认 1 跳）")
+    parser.add_argument("--limit", type=int, default=300, help="单次最多新增条数")
+    parser.add_argument("--interval", type=float, default=1.2, help="请求间隔秒数")
+    parser.add_argument("--refresh-days", type=int, default=7,
+                        help="多少天内不重复抓取同一实体（默认 7 天）")
+    parser.add_argument("--ps", type=int, default=30, help="用户投稿每页条数")
+    parser.add_argument("--user-pages", type=int, default=3, help="每个用户最多翻几页")
+    parser.add_argument("--neighbor-videos", type=int, default=10)
+    parser.add_argument("--neighbor-dynamics", type=int, default=10)
+    parser.add_argument("--neighbor-articles", type=int, default=5)
+    parser.add_argument("--related", type=int, default=5, help="每个视频最多取几条相关推荐")
+    parser.add_argument("--cookie", default="", help="追加 cookie（如 SESSDATA=...）")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="BiliSearch 图式爬虫")
+    add_args(parser)
+    args = parser.parse_args()
+    return run_crawl(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

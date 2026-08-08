@@ -1,0 +1,11 @@
+# 种子文件：每行一个 ID 或链接，支持以下格式：
+#   视频： BV1GJ411x7h7 / av170001 / https://www.bilibili.com/video/BV1GJ411x7h7
+#   用户： mid:546195 / uid:546195 / https://space.bilibili.com/546195
+#   专栏： cv4269 / https://www.bilibili.com/read/cv4269
+#   动态： https://t.bilibili.com/1234567890
+# 爬虫会顺着这些种子扩展：视频->作者->作者投稿/动态/专栏，视频->相关推荐视频。
+
+BV1GJ411x7h7
+mid:546195
+cv4269
+

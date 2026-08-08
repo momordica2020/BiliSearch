@@ -1,0 +1,58 @@
+"""命令行入口：单次爬取或常驻调度器。"""
+
+import argparse
+import subprocess
+import sys
+import time
+
+from .crawl import add_args, run_crawl
+
+
+def build(args):
+    subprocess.run(
+        [sys.executable, "build_index.py", "--raw", f"{args.data_dir}/raw",
+         "--out", args.site_data],
+        check=False,
+    )
+
+
+def scheduler_loop(args):
+    print(f"[scheduler] 常驻模式：每 {args.interval_hours} 小时执行一次")
+    while True:
+        started = time.time()
+        try:
+            rc = run_crawl(args)
+            if args.build and rc == 0:
+                build(args)
+        except Exception as e:  # noqa: BLE001 - 常驻进程不允许中断
+            print(f"[scheduler] 本轮错误: {e}")
+        elapsed = time.time() - started
+        sleep = max(60, args.interval_hours * 3600 - elapsed)
+        print(f"[scheduler] 本轮耗时 {elapsed:.0f}s，{sleep / 3600:.1f} 小时后再次执行")
+        time.sleep(sleep)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="BiliSearch：本地定时爬取 B 站元数据并构建离线索引")
+    add_args(parser)
+    parser.add_argument("--mode", choices=["crawl", "scheduler"], default="crawl",
+                        help="crawl=执行一次；scheduler=常驻循环")
+    parser.add_argument("--build", action="store_true",
+                        help="爬取完成后运行 build_index.py 构建站点索引")
+    parser.add_argument("--interval-hours", type=float, default=6.0,
+                        help="scheduler 模式下两次爬取间隔（小时）")
+    parser.add_argument("--site-data", default="site/data",
+                        help="索引输出目录（默认 site/data）")
+    args = parser.parse_args()
+    if args.mode == "scheduler":
+        scheduler_loop(args)
+        return 0
+    rc = run_crawl(args)
+    if args.build and rc == 0:
+        build(args)
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())
