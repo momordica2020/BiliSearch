@@ -97,9 +97,11 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1 -Push
 ```powershell
 # 注册：每 6 小时爬一次并构建索引
 powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1 -IntervalHours 6 -UseVenv
+# 注册：爬取后自动发布到 gh-pages（需 git 已配置 GitHub 凭据）
+powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1 -IntervalHours 6 -UseVenv -Deploy
 ```
 
-任务会运行 `python -m crawler --mode crawl --build ...`，工作目录为仓库根目录。如需顺带推送到 GitHub，可另建一个计划任务执行 `scripts\deploy.ps1 -Push`，或在下面常驻模式中处理。
+任务会运行 `python -m crawler --mode crawl --build ...`，工作目录为仓库根目录；加 `-Deploy` 后会在爬取完成后自动执行 `scripts\deploy.ps1 -Push`，实现“爬取→建索引→发布”全自动闭环。
 
 ### 方式二：常驻进程
 
