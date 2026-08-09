@@ -112,10 +112,18 @@
         throw new Error("meta.json 中没有可加载的分片（请先运行 build_index.py）");
       }
       this.meta = meta;
+      // metaUrl 可能是相对路径（如 data/meta.json），先基于页面地址解析成绝对 URL，
+      // 否则 new URL(shard, metaUrl) 在浏览器会抛 "Invalid base URL"。
+      const base = new URL(
+        metaUrl,
+        typeof location !== "undefined" && location.href
+          ? location.href
+          : "http://localhost/"
+      );
       const total = meta.shards.length;
       let done = 0;
       for (const sh of meta.shards) {
-        const body = await fetchText(new URL(sh.url, metaUrl).href);
+        const body = await fetchText(new URL(sh.url, base).href);
         for (const line of body.split("\n")) {
           const t = line.trim();
           if (!t) continue;

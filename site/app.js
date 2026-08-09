@@ -77,7 +77,8 @@
   async function loadIndex() {
     setLoading("正在下载索引…");
     try {
-      const meta = await engine.load("data/meta.json", (done, total) => {
+      const metaUrl = new URL("data/meta.json", location.href).href;
+      const meta = await engine.load(metaUrl, (done, total) => {
         setLoading("正在下载索引 " + done + "/" + total + " 分片…");
       });
       ready = true;
@@ -176,4 +177,3 @@
 
   document.addEventListener("DOMContentLoaded", init);
 })();
-
