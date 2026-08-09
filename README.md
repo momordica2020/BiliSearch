@@ -63,6 +63,8 @@ python -m http.server 8080 -d site
 # 打开 http://localhost:8080
 ```
 
+> 说明：这台机器上 `.venv\Scripts\python.exe` 是 **venv 启动器**，运行时会出现两个进程（`.venv\...\python.exe` + 子进程 `C:\Python312\python.exe`），这是正常现象——**真正执行爬虫的是子进程**，父进程只是等待壳，锁也只被爬虫进程持有一次。想只看到一个进程，直接改用系统解释器：`C:\Python312\python.exe -m crawler ...`（已含 curl_cffi）。
+
 参数速览（`python -m crawler --help`）：
 
 | 参数 | 默认 | 说明 |
@@ -89,6 +91,9 @@ python -m http.server 8080 -d site
 在终端里跑一条命令即可**全天候漫游**，每隔 N 分钟自动构建索引并推送到 git：
 
 ```powershell
+# 推荐（单进程）：
+C:\Python312\python.exe -m crawler --mode continuous --sync-minutes 30 --workers 8 --interval 0.4
+# 或用 venv（会出现 启动器+子进程 两个进程，属正常）：
 .\.venv\Scripts\python.exe -m crawler --mode continuous --sync-minutes 30 --workers 8 --interval 0.4
 ```
 
