@@ -77,6 +77,37 @@ python -m http.server 8080 -d site
 | `--build` | - | 爬完后自动运行 build_index.py |
 | `--mode scheduler` | - | 常驻循环模式 |
 
+## 视频批量快抓（burst 模式）
+
+想快速铺量视频数据时用 burst：**多线程并发，只抓视频元数据本身**，不展开作者/动态/专栏。视频 ID 来源可以是列表文件、热门榜、分区排行榜：
+
+```powershell
+# 从列表文件抓取（每行一个 BV/av 或链接）
+.\.venv\Scripts\python.exe -m crawler --mode burst --bv-file bvids.txt --workers 8 --interval 0.5 --build
+
+# 从热门榜 + 多个分区排行榜收集并抓取
+.\.venv\Scripts\python.exe -m crawler --mode burst --popular 200 --ranking 0,1,4,36,160,188 --workers 8 --interval 0.5 --build
+```
+
+burst 模式参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `--bv-file` | 每行一个 BV/av 的视频列表文件 |
+| `--popular N` | 从热门榜收集 N 条视频（每页 20，自动翻页） |
+| `--ranking rid1,rid2` | 分区排行榜：0=全站，1=动画，3=音乐，4=游戏，5=娱乐，36=科技，119=鬼畜，129=舞蹈，155=时尚，160=生活，188=影视 |
+| `--workers` | 并发数：无 cookie 建议 4~8；带 SESSDATA 可到 8~12 |
+| `--interval` | 每个 worker 的请求间隔，**总请求频率 ≈ workers/interval 每秒**，风控敏感就调小 workers 或调大 interval |
+| `--build` | 抓完后自动构建索引并发布（需配合 deploy） |
+
+已抓过的视频在 `refresh-days` 内自动跳过，重复跑不会重复抓。可选登录 cookie（提高并发与降低风控概率）：
+
+```powershell
+.\.venv\Scripts\python.exe -m crawler --mode burst --popular 500 --workers 12 --interval 0.3 --cookie "SESSDATA=xxxx"
+```
+
+cookie 只保存在 `data/state.json`（已 gitignore），不要提交到仓库；建议使用个人小号，风险自负。
+
 ## 部署到 GitHub Pages
 
 仓库设置里把 Pages 的 Source 设为 `gh-pages` 分支，然后：
@@ -102,6 +133,8 @@ powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1 -IntervalHour
 ```
 
 任务会运行 `python -m crawler --mode crawl --build ...`，工作目录为仓库根目录；加 `-Deploy` 后会在爬取完成后自动执行 `scripts\deploy.ps1 -Push`，实现“爬取→建索引→发布”全自动闭环。
+
+想用快抓模式做定时任务也可以：`-Mode burst -Popular 200 -Ranking 0,1,4,36 -Workers 6 -IntervalSeconds 0.6 -Deploy`（更多参数见 burst 模式一节）。
 
 ### 方式二：常驻进程
 

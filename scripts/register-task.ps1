@@ -5,11 +5,18 @@
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1 -IntervalHours 6 -UseVenv
   powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1 -IntervalHours 6 -UseVenv -Deploy
+  powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1 -Mode burst -Popular 200 -Ranking 0,1,4,36 -Workers 6 -UseVenv -Deploy
 #>
 param(
     [string]$TaskName = "BiliSearch-Crawl",
     [int]$IntervalHours = 6,
     [int]$Limit = 300,
+    [ValidateSet("crawl", "burst")]
+    [string]$Mode = "crawl",
+    [int]$Popular = 0,
+    [string]$Ranking = "",
+    [int]$Workers = 4,
+    [double]$IntervalSeconds = 1.2,
     [string]$DataDir = "data",
     [switch]$UseVenv,
     [switch]$Deploy
@@ -24,7 +31,13 @@ if ($UseVenv) {
     $py = (Get-Command python).Source
 }
 
-$crawlArgs = "-m crawler --mode crawl --build --data-dir `"$DataDir`" --limit $Limit"
+if ($Mode -eq "burst") {
+    $crawlArgs = "-m crawler --mode burst --build --data-dir `"$DataDir`" --workers $Workers --interval $IntervalSeconds"
+    if ($Popular -gt 0) { $crawlArgs += " --popular $Popular" }
+    if ($Ranking) { $crawlArgs += " --ranking `"$Ranking`"" }
+} else {
+    $crawlArgs = "-m crawler --mode crawl --build --data-dir `"$DataDir`" --limit $Limit"
+}
 $actions = @(
     (New-ScheduledTaskAction -Execute $py -Argument $crawlArgs -WorkingDirectory $root)
 )

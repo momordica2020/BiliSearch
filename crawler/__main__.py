@@ -5,7 +5,7 @@ import subprocess
 import sys
 import time
 
-from .crawl import add_args, run_crawl
+from .crawl import add_args, run_burst, run_crawl
 
 
 def build(args):
@@ -36,8 +36,6 @@ def main():
     parser = argparse.ArgumentParser(
         description="BiliSearch：本地定时爬取 B 站元数据并构建离线索引")
     add_args(parser)
-    parser.add_argument("--mode", choices=["crawl", "scheduler"], default="crawl",
-                        help="crawl=执行一次；scheduler=常驻循环")
     parser.add_argument("--build", action="store_true",
                         help="爬取完成后运行 build_index.py 构建站点索引")
     parser.add_argument("--interval-hours", type=float, default=6.0,
@@ -45,6 +43,11 @@ def main():
     parser.add_argument("--site-data", default="site/data",
                         help="索引输出目录（默认 site/data）")
     args = parser.parse_args()
+    if args.mode == "burst":
+        rc = run_burst(args)
+        if args.build and rc == 0:
+            build(args)
+        return rc
     if args.mode == "scheduler":
         scheduler_loop(args)
         return 0

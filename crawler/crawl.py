@@ -15,8 +15,10 @@ import json
 import math
 import re
 import sys
+import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .bili import BiliClient, BiliError
@@ -287,6 +289,119 @@ def load_seeds(args):
     return seeds
 
 
+def collect_bv_seeds(args, client):
+    """批量收集视频 ID：--bv-file / --seed / --popular / --ranking。"""
+    seeds = []
+    if args.bv_file:
+        for line in Path(args.bv_file).read_text("utf-8").splitlines():
+            s = parse_seed(line)
+            if s and s[0] == "video":
+                seeds.append(s[1])
+    for seed in args.seed or []:
+        s = parse_seed(seed)
+        if s and s[0] == "video":
+            seeds.append(s[1])
+    if args.popular > 0:
+        pages = max(1, math.ceil(args.popular / 20))
+        for pn in range(1, pages + 1):
+            try:
+                for v in client.popular(pn, 20):
+                    if v.get("bvid"):
+                        seeds.append(v["bvid"])
+            except BiliError as e:
+                print(f"  [warn] 热门第 {pn} 页失败: {e}")
+    if args.ranking:
+        for rid in args.ranking.split(","):
+            rid = rid.strip()
+            if not rid:
+                continue
+            try:
+                for v in client.ranking(int(rid)):
+                    if v.get("bvid"):
+                        seeds.append(v["bvid"])
+                print(f"  [ok] 排行榜 rid={rid} 收集完成")
+            except BiliError as e:
+                print(f"  [warn] 排行榜 rid={rid} 失败: {e}")
+    seen = set()
+    uniq = []
+    for bv in seeds:
+        if bv not in seen:
+            seen.add(bv)
+            uniq.append(bv)
+    return uniq
+
+
+def run_burst(args):
+    """视频批量快抓：多线程只抓视频元数据，不展开作者/动态/专栏。"""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    args.related = 0  # burst 只抓视频本身；需要相关推荐扩展请用 crawl 模式
+    data_dir = Path(args.data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir = data_dir / "raw"
+    raw_dir.mkdir(exist_ok=True)
+    state_path = data_dir / "state.json"
+    state = {}
+    if state_path.exists():
+        state = json.loads(state_path.read_text("utf-8"))
+    if args.cookie and not state.get("cookie_extra"):
+        state["cookie_extra"] = args.cookie
+
+    # 预热身份（cookie/WBI 密钥），避免多线程并发初始化竞态
+    client = BiliClient(state, interval=args.interval)
+    client._ensure_cookies()
+    client._ensure_wbi()
+
+    bvs = collect_bv_seeds(args, client)
+    seen_state = state.setdefault("seen", {})
+    now = int(time.time())
+    refresh = args.refresh_days * 86400
+    todo = [
+        bv for bv in bvs
+        if f"video:{bv}" not in seen_state
+        or now - int(seen_state.get(f"video:{bv}", 0)) >= refresh
+    ]
+    print(f"收集到 {len(bvs)} 个视频 ID，去重/刷新后待抓 {len(todo)} 个；"
+          f"workers={args.workers}，每 worker 间隔 {args.interval}s")
+    if not todo:
+        print("没有需要抓取的视频（都在 refresh-days 内）")
+        return 0
+
+    out_path = raw_dir / RAW_FILES["video"]
+    out_file = out_path.open("a", encoding="utf-8")
+    lock = threading.Lock()
+    stats = {"ok": 0, "err": 0}
+
+    def work(bv):
+        key = f"video:{bv}"
+        try:
+            c = BiliClient(state, interval=args.interval)
+            rec, _ = fetch_item(c, "video", bv, args)
+            if rec:
+                with lock:
+                    out_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    out_file.flush()
+                    seen_state[key] = now
+                    stats["ok"] += 1
+                print(f"[ok] {key} | {rec['title'][:48]}")
+                return
+        except BiliError as e:
+            with lock:
+                stats["err"] += 1
+            print(f"[skip] {key}: {e}")
+
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+        list(ex.map(work, todo))
+
+    out_file.close()
+    state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
+    print(f"burst 完成：成功 {stats['ok']}，失败 {stats['err']}")
+    return 0
+
+
 def run_crawl(args):
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -362,6 +477,8 @@ def run_crawl(args):
 
 
 def add_args(parser):
+    parser.add_argument("--mode", choices=["crawl", "scheduler", "burst"],
+                        default="crawl", help="crawl=图式爬取；burst=视频批量快抓；scheduler=常驻")
     parser.add_argument("--data-dir", default="data", help="数据目录（默认 data）")
     parser.add_argument("--seeds", default="seeds.txt", help="种子文件路径")
     parser.add_argument("--seed", action="append", default=[], help="追加单条种子，可多次")
@@ -379,12 +496,22 @@ def add_args(parser):
     parser.add_argument("--neighbor-articles", type=int, default=5)
     parser.add_argument("--related", type=int, default=5, help="每个视频最多取几条相关推荐")
     parser.add_argument("--cookie", default="", help="追加 cookie（如 SESSDATA=...）")
+    parser.add_argument("--workers", type=int, default=4,
+                        help="burst 模式并发 worker 数（默认 4；有 SESSDATA 可到 8-12）")
+    parser.add_argument("--bv-file", default=None,
+                        help="burst 模式：每行一个 BV/av 的视频列表文件")
+    parser.add_argument("--popular", type=int, default=0,
+                        help="burst 模式：从热门榜收集 N 个视频")
+    parser.add_argument("--ranking", default="",
+                        help="burst 模式：按 rid 收集排行榜（逗号分隔，0=全站）")
 
 
 def main():
     parser = argparse.ArgumentParser(description="BiliSearch 图式爬虫")
     add_args(parser)
     args = parser.parse_args()
+    if args.mode == "burst":
+        return run_burst(args)
     return run_crawl(args)
 
 

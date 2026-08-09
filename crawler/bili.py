@@ -256,3 +256,10 @@ class BiliClient:
         """热门视频，用于无种子时引导爬取。"""
         data = self._get("/x/web-interface/popular", {"pn": pn, "ps": ps}).get("data") or {}
         return data.get("list") or []
+
+    def ranking(self, rid=0):
+        """分区排行榜（rid=0 全站，1 动画 / 3 音乐 / 4 游戏 / 5 娱乐 / 36 科技等）。"""
+        data = self._get(
+            "/x/web-interface/ranking/v2", {"rid": rid, "type": "all"}
+        ).get("data") or {}
+        return data.get("list") or []
