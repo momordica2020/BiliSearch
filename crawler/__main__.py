@@ -4,8 +4,9 @@ import argparse
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-from .crawl import add_args, run_burst, run_continuous, run_crawl, run_roam
+from .crawl import acquire_lock, add_args, run_burst, run_continuous, run_crawl, run_roam
 
 
 def build(args):
@@ -43,25 +44,39 @@ def main():
     parser.add_argument("--site-data", default="site/data",
                         help="索引输出目录（默认 site/data）")
     args = parser.parse_args()
-    if args.mode == "burst":
-        rc = run_burst(args)
+    lock = None
+    if not args.no_lock:
+        lock = acquire_lock(Path(args.data_dir) / "crawler.lock")
+        if lock is None:
+            print(f"[lock] 已有爬取进程在运行（{args.data_dir}/crawler.lock 被占用），"
+                  f"为避免重复爬取已退出；确认没有其他爬虫后删除该文件即可。", file=sys.stderr)
+            return 1
+    try:
+        if args.mode == "burst":
+            rc = run_burst(args)
+            if args.build and rc == 0:
+                build(args)
+            return rc
+        if args.mode == "roam":
+            rc = run_roam(args)
+            if args.build and rc == 0:
+                build(args)
+            return rc
+        if args.mode == "continuous":
+            return run_continuous(args)
+        if args.mode == "scheduler":
+            scheduler_loop(args)
+            return 0
+        rc = run_crawl(args)
         if args.build and rc == 0:
             build(args)
         return rc
-    if args.mode == "roam":
-        rc = run_roam(args)
-        if args.build and rc == 0:
-            build(args)
-        return rc
-    if args.mode == "continuous":
-        return run_continuous(args)
-    if args.mode == "scheduler":
-        scheduler_loop(args)
-        return 0
-    rc = run_crawl(args)
-    if args.build and rc == 0:
-        build(args)
-    return rc
+    finally:
+        if lock:
+            try:
+                lock.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ __pycache__/
 data/raw/
 data/state.json
 data/cookies.txt
+data/crawler.lock
 site/data/
 .worktrees/
 .DS_Store

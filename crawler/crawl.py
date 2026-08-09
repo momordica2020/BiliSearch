@@ -84,6 +84,38 @@ def install_sigint(stop_event):
 
     signal.signal(signal.SIGINT, handler)
 
+
+def acquire_lock(lock_path):
+    """进程级互斥锁：防止误开多个爬取进程（同文件同时跑会重复抓取并互相覆盖状态）。
+    返回锁文件句柄；已被占用时返回 None。"""
+    lock_path = Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        f = lock_path.open("r+", encoding="utf-8")
+    except FileNotFoundError:
+        f = lock_path.open("w", encoding="utf-8")
+        f.write("0")
+        f.flush()
+    f.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            f.close()
+        except Exception:
+            pass
+        return None
+    f.seek(0)
+    f.write(str(os.getpid()))
+    f.truncate()
+    f.flush()
+    return f
+
 VIDEO_RE = re.compile(r"(BV[0-9A-Za-z]{10}|av\d+)", re.I)
 MID_RE = re.compile(r"(?:mid|uid)\s*[:：]?\s*(\d+)", re.I)
 CV_RE = re.compile(r"(?:cv|read[/_]cv|article[/?]id[=:])(\d+)", re.I)
@@ -619,18 +651,26 @@ def run_roam(args):
             with lock:
                 if key in run_seen or (refresh and key in seen_state
                                        and now - int(seen_state[key]) < refresh):
+                    empty_tries += 1
+                    if empty_tries > 15:
+                        return
                     continue
                 run_seen.add(key)
             try:
                 rec, neigh = fetch_item(c, "video", bv, args)
             except BiliError as e:
+                empty_tries += 1
                 with lock:
                     stats["err"] += 1
                 if stats["err"] % 25 == 1:
                     print(f"[skip] {key}: {e}")
                 continue
             if not rec:
+                empty_tries += 1
+                if empty_tries > 15:
+                    return
                 continue
+            empty_tries = 0
             with lock:
                 if (stop_event.is_set()
                         or (deadline and time.time() >= deadline)
@@ -844,19 +884,35 @@ def add_args(parser):
                         help="roam 模式：单次最多跑多少秒（0=不限）")
     parser.add_argument("--sync-minutes", type=int, default=30,
                         help="continuous 模式：每隔多少分钟构建索引并推送 git")
+    parser.add_argument("--no-lock", action="store_true",
+                        help="跳过单实例互斥锁（默认同目录只允许一个爬取进程）")
 
 
 def main():
     parser = argparse.ArgumentParser(description="BiliSearch 图式爬虫")
     add_args(parser)
     args = parser.parse_args()
-    if args.mode == "burst":
-        return run_burst(args)
-    if args.mode == "roam":
-        return run_roam(args)
-    if args.mode == "continuous":
-        return run_continuous(args)
-    return run_crawl(args)
+    lock = None
+    if not args.no_lock:
+        lock = acquire_lock(Path(args.data_dir) / "crawler.lock")
+        if lock is None:
+            print(f"[lock] 已有爬取进程在运行（{args.data_dir}/crawler.lock 被占用），"
+                  f"为避免重复爬取已退出；确认没有其他爬虫后删除该文件即可。", file=sys.stderr)
+            return 1
+    try:
+        if args.mode == "burst":
+            return run_burst(args)
+        if args.mode == "roam":
+            return run_roam(args)
+        if args.mode == "continuous":
+            return run_continuous(args)
+        return run_crawl(args)
+    finally:
+        if lock:
+            try:
+                lock.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
