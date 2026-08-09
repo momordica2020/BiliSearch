@@ -176,14 +176,14 @@
     search(query, opts = {}) {
       const q = String(query || "").trim().toLowerCase();
       if (!q) return { total: 0, items: [] };
-      const types = Array.isArray(opts.types) && opts.types.length
-        ? new Set(opts.types) : null;
       const fuzzy = opts.fuzzy == null ? 1 : opts.fuzzy;
       const limit = opts.limit || 50;
       const offset = opts.offset || 0;
       const qTokens = tokenize(q);
       const scores = new Map();
-      const wantTypes = types ? new Set(types.map((t) => TYPES.indexOf(t))) : null;
+      const wantTypes = Array.isArray(opts.types) && opts.types.length
+        ? new Set(opts.types.map((t) => TYPES.indexOf(t)))
+        : null;
 
       const allowed = (docT) => !wantTypes || wantTypes.has(docT);
 

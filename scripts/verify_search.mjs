@@ -27,3 +27,8 @@ for (const q of queries) {
     console.log(`  [${typeName(it.t)}] ${it.s} | ${it.a} | ${urlOf(it)} (相关度 ${it.score})`);
   }
 }
+// 回归：带类型筛选（曾因残留 Set 导致 types.map is not a function）
+const typed = engine.search("老番茄", { types: ["video"], limit: 3 });
+console.log(`\n类型筛选「video」→ ${typed.total} 条，首条类型: ${typeName(typed.items[0]?.t)}`);
+const typedAll = engine.search("老番茄", { types: ["video", "user"], limit: 5 });
+console.log(`多类型筛选 → ${typedAll.total} 条（应同时含视频与 UP主）`);
