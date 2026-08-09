@@ -7,7 +7,7 @@ import { join, normalize } from "node:path";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { BiliSearchEngine } = require("../site/search.js");
+const { BiliSearchEngine, typeName, urlOf } = require("../site/search.js");
 
 const root = normalize(join(import.meta.dirname, "..", "site"));
 const port = 8123;
@@ -43,7 +43,7 @@ server.listen(port, "127.0.0.1", async () => {
     );
     const { total, items } = engine.search("老番茄", { limit: 3 });
     console.log(`load OK：${meta.total} 条，查询「老番茄」→ ${total} 条`);
-    for (const it of items) console.log(`  [${it.t}] ${it.s} | ${it.l}`);
+    for (const it of items) console.log(`  [${typeName(it.t)}] ${it.s} | ${urlOf(it)}`);
   } catch (e) {
     console.error("load FAIL:", e.message);
     process.exitCode = 1;

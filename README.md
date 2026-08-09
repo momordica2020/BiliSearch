@@ -202,12 +202,34 @@ powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1 -IntervalHour
 
 索引由 `site/data/meta.json` 里的 `shards[].url` 清单驱动，浏览器逐个分片加载，**分片之间互相独立**：
 
-1. **增大分片数**：`python build_index.py --shard-size 2000`，更多小分片 = 首屏更快但文件更多；
-2. **原始数据放独立分支**：把 `data/` 提交到 `data-branch`，本机用 `git worktree add data-branch` 拉下来增量爬取，主仓库只保留代码与站点；
-3. **分片多仓库托管**：把某几个 `site/data/shards/NNNN.jsonl.gz` 推到另一个仓库，再把 `meta.json` 里对应 `url` 改成
-   `https://raw.githubusercontent.com/<user>/<repo>/<branch>/shards/NNNN.jsonl.gz` 即可。浏览器按需跨域拉取，无需后端。
+1. **稳定分桶（默认已开启）**：按 `(type:id)` 哈希分到固定 16 桶，文件名带内容哈希。无新增数据时重复构建**分片字节级不变**，git 不会产生新提交；有新增时只有命中的桶变化，历史增量极小；
+2. **分片多仓库托管**：把某几个 `site/data/shards/*.jsonl.gz` 推到另一个仓库，再把 `meta.json` 里对应 `url` 改成
+   `https://raw.githubusercontent.com/<user>/<repo>/<branch>/shards/XX-xxxx.jsonl.gz` 即可。浏览器按需跨域拉取，无需后端；
+3. **原始数据放独立分支**：把 `data/` 提交到 `data-branch`，本机用 `git worktree add data-branch` 拉下来增量爬取，主仓库只保留代码与站点；
+4. **极端省体积**：`python build_index.py --desc-len 0` 不索引描述（只搜标题/UP主/分类），体积可再降约一半。
 
 原始数据是追加式 JSONL，`build_index.py` 按 `(type, id)` 去重、后写覆盖先写，重复跑不会膨胀索引。
+
+## 规模与 GitHub 限制（重要）
+
+GitHub 的硬性限制（2026 年口径）：
+
+| 限制 | 数值 |
+| --- | --- |
+| 单文件 | 100MB 硬上限（50MB 警告） |
+| Pages 站点 | 软上限约 1GB，超出后可能停止服务 |
+| 仓库体积 | 建议 <1GB，硬上限约 5GB |
+| Git LFS | **Pages 不支持**，大文件不能靠 LFS 绕过 |
+
+当前索引 v2 格式实测约 **130B/条（gzip）**：100 万条 ≈ 130MB，1000 万条 ≈ 1.3GB。结论：**单仓库托管的安全范围约 300 万~500 万条**，再往上必须分片外置（多仓库 / 其他静态托管）。
+
+项目已为这个上限做了三件事：
+
+1. **紧凑格式 v2**：不存 URL（客户端由 id 推导）、空字段省略、类型数字编码，见 `build_index.py`；
+2. **稳定分桶 + 内容哈希文件名**：未变化的分片不会被 git 重复提交，每次部署的增量只有真正变化的桶；
+3. **分片清单外置**：`meta.json` 的 `shards[].url` 可指向任意仓库/外站，多仓库横向扩容不用改代码。
+
+浏览器端现实上限：全量 JSON 解析 + 倒排索引在内存里，约 **100 万~200 万条以内体验良好**；更大规模需要“分片路由”（给每个分片挂关键词摘要、只下载相关分片）或换服务端搜索，这是下一步可做的方向。
 
 ## 风控与合规
 

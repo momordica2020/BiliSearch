@@ -6,7 +6,7 @@ import { gunzipSync } from "node:zlib";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { BiliSearchEngine } = require("../site/search.js");
+const { BiliSearchEngine, typeName, urlOf } = require("../site/search.js");
 
 const dataDir = process.argv[2] || "site/data";
 const meta = JSON.parse(readFileSync(join(dataDir, "meta.json"), "utf8"));
@@ -24,7 +24,6 @@ for (const q of queries) {
   const { total, items } = engine.search(q, { limit: 5 });
   console.log(`\n查询「${q}」→ ${total} 条`);
   for (const it of items) {
-    console.log(`  [${it.t}] ${it.s} | ${it.a} | ${it.l} (相关度 ${it.score})`);
+    console.log(`  [${typeName(it.t)}] ${it.s} | ${it.a} | ${urlOf(it)} (相关度 ${it.score})`);
   }
 }
-

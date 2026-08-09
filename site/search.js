@@ -15,6 +15,7 @@
 
   const CJK = /[\u3400-\u9fff]/;
   const WORD = /[a-z0-9][a-z0-9._#+\-]*/g;
+  const TYPES = ["video", "user", "dynamic", "article"];
 
   function tokenize(text) {
     const tokens = [];
@@ -68,6 +69,27 @@
       map.set(token, m);
     }
     m.set(docIdx, (m.get(docIdx) || 0) + weight);
+  }
+
+  function typeName(t) {
+    return TYPES[t] || String(t);
+  }
+
+  // URL 全部由 id 客户端推导，索引里不再存链接（省约 30% 体积）
+  function urlOf(doc) {
+    const id = String(doc.i || "");
+    switch (typeName(doc.t)) {
+      case "video":
+        return "https://www.bilibili.com/video/" + id;
+      case "user":
+        return "https://space.bilibili.com/" + id.replace(/^mid:/, "");
+      case "dynamic":
+        return "https://t.bilibili.com/" + id.replace(/^dyn:/, "");
+      case "article":
+        return "https://www.bilibili.com/read/" + (id.startsWith("cv") ? id : "cv" + id);
+      default:
+        return "";
+    }
   }
 
   class BiliSearchEngine {
@@ -137,11 +159,11 @@
       return meta;
     }
 
-    _apply(map, token, weight, scores, typesSet, boostTitle) {
+    _apply(map, token, weight, scores, wantTypes, boostTitle) {
       const m = map.get(token);
       if (!m) return;
       for (const [di, w] of m) {
-        if (typesSet && !typesSet.has(this.docs[di].t)) continue;
+        if (wantTypes && !wantTypes.has(this.docs[di].t)) continue;
         let s = (scores.get(di) || 0) + w * weight;
         if (boostTitle) {
           const tm = this.titleIdx.get(token);
@@ -161,6 +183,9 @@
       const offset = opts.offset || 0;
       const qTokens = tokenize(q);
       const scores = new Map();
+      const wantTypes = types ? new Set(types.map((t) => TYPES.indexOf(t))) : null;
+
+      const allowed = (docT) => !wantTypes || wantTypes.has(docT);
 
       for (const tok of qTokens) {
         if (tok.length === 1 && CJK.test(tok)) {
@@ -168,18 +193,18 @@
           for (const [key, m] of this.idx) {
             if (!key.includes(tok)) continue;
             for (const [di, w] of m) {
-              if (typesSet2(types, this.docs[di].t)) continue;
+              if (!allowed(this.docs[di].t)) continue;
               scores.set(di, (scores.get(di) || 0) + w * 0.6);
             }
           }
           continue;
         }
-        this._apply(this.idx, tok, 2.2, scores, types, true);
+        this._apply(this.idx, tok, 2.2, scores, wantTypes, true);
         if (/[a-z0-9]/.test(tok)) {
           if (tok.length >= 2) {
             for (const key of this.idx.keys()) {
               if (key.length > tok.length && key.startsWith(tok)) {
-                this._apply(this.idx, key, 1.1, scores, types, false);
+                this._apply(this.idx, key, 1.1, scores, wantTypes, false);
               }
             }
           }
@@ -188,7 +213,7 @@
             for (const key of this.idx.keys()) {
               if (Math.abs(key.length - tok.length) > distCap) continue;
               if (levenshtein(key, tok, distCap) <= distCap) {
-                this._apply(this.idx, key, 0.9, scores, types, false);
+                this._apply(this.idx, key, 0.9, scores, wantTypes, false);
               }
             }
           }
@@ -209,9 +234,5 @@
     }
   }
 
-  function typesSet2(set, t) {
-    return set && !set.has(t);
-  }
-
-  return { BiliSearchEngine, tokenize, levenshtein, fetchText };
+  return { BiliSearchEngine, tokenize, levenshtein, fetchText, typeName, urlOf };
 });

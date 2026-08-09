@@ -136,13 +136,14 @@
   }
 
   function itemHTML(d) {
-    const label = TYPE_LABEL[d.t] || d.t;
+    const tname = BiliSearch.typeName(d.t);
+    const label = TYPE_LABEL[tname] || tname;
     const date = d.p ? fmtDate(d.p) : "";
     const meta = [d.a, d.c, date, "相关度 " + (d.score || 0)].filter(Boolean).join(" · ");
     const desc = d.d ? '<div class="res-desc">' + esc(d.d) + "</div>" : "";
     return (
-      '<a class="res" href="' + esc(d.l) + '" target="_blank" rel="noopener">' +
-      '<div class="res-top"><span class="badge t-' + esc(d.t) + '">' + label + "</span>" +
+      '<a class="res" href="' + esc(BiliSearch.urlOf(d)) + '" target="_blank" rel="noopener">' +
+      '<div class="res-top"><span class="badge t-' + esc(tname) + '">' + label + "</span>" +
       '<span class="res-title">' + esc(d.s) + "</span></div>" +
       '<div class="res-meta">' + esc(meta) + "</div>" + desc +
       "</a>"
