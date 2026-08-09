@@ -52,6 +52,9 @@ def main():
                   f"为避免重复爬取已退出；确认没有其他爬虫后删除该文件即可。", file=sys.stderr)
             return 1
     try:
+        stop_file = Path(args.stop_file)
+        if stop_file.exists():
+            stop_file.unlink()  # 清除上次遗留的停止标记
         if args.mode == "burst":
             rc = run_burst(args)
             if args.build and rc == 0:

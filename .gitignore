@@ -5,6 +5,7 @@ data/raw/
 data/state.json
 data/cookies.txt
 data/crawler.lock
+data/stop
 site/data/
 .worktrees/
 .DS_Store

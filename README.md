@@ -81,6 +81,7 @@ python -m http.server 8080 -d site
 
 - 三种模式（crawl / burst / roam）都会**每 5 秒打印一行整体进度**：`[进度 roam] 37s | 300/300 | 成功 300 失败 0 | 486 条/分`（终端里原地刷新，管道/日志里逐行输出）
 - **Ctrl+C**：第一次按下会优雅停止（当前请求结束后保存状态退出），第二次立即强制退出（退出码 130）
+- **停止标记（不依赖 Ctrl+C）**：若你的启动方式（IDE/某些终端）收不到 Ctrl+C，执行 `powershell -ExecutionPolicy Bypass -File scripts\stop.ps1`，或手动创建 `data\stop` 文件，爬虫会在数秒内保存状态并退出；continuous 模式遇到任何异常也只会记录并继续下一轮，不会自动退出
 - **单实例保护**：同一 `data/` 目录默认只允许一个爬取进程（`data/crawler.lock` 互斥锁），误开第二个会被直接拒绝，避免重复抓取和状态互相覆盖；确认无其他爬虫后可用 `--no-lock` 跳过
 
 ## 24 小时不间断爬取（continuous 模式）

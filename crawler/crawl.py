@@ -93,14 +93,17 @@ def acquire_lock(lock_path):
     # r+：不截断；不存在时用 "x"（O_EXCL）原子创建，避免与竞争者互相截断
     try:
         f = lock_path.open("r+", encoding="utf-8")
+        created = False
     except FileNotFoundError:
         try:
             f = lock_path.open("x", encoding="utf-8")
+            created = True
         except FileExistsError:
             f = lock_path.open("r+", encoding="utf-8")
+            created = False
     try:
         f.seek(0)
-        if not f.read(1):
+        if created or not f.read(1):
             f.write("0")  # 保证至少 1 字节可锁
             f.flush()
         f.seek(0)
@@ -121,6 +124,24 @@ def acquire_lock(lock_path):
     f.truncate()
     f.flush()
     return f
+
+
+def stop_requested(stop_file):
+    """停止标记文件存在即请求停止（跨平台、不依赖 Ctrl+C 能否送达）。"""
+    return bool(stop_file) and Path(stop_file).exists()
+
+
+def _save_state(state, state_path):
+    """原子写 state.json；失败只警告不中断。"""
+    try:
+        tmp = str(state_path) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, state_path)
+        return True
+    except Exception as e:
+        print(f"[warn] 状态保存失败: {e}", file=sys.stderr)
+        return False
 
 VIDEO_RE = re.compile(r"(BV[0-9A-Za-z]{10}|av\d+)", re.I)
 MID_RE = re.compile(r"(?:mid|uid)\s*[:：]?\s*(\d+)", re.I)
@@ -478,6 +499,9 @@ def run_burst(args):
     def worker():
         c = BiliClient(state, interval=args.interval)
         while not stop_event.is_set():
+            if stop_requested(args.stop_file):
+                stop_event.set()
+                break
             try:
                 bv = work_queue.get_nowait()
             except Empty:
@@ -513,7 +537,7 @@ def run_burst(args):
         reporter.join(timeout=1)
         out_file.close()
         state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
+        _save_state(state, state_path)
     print(f"burst 结束：成功 {stats['ok']}，失败 {stats['err']}")
     return 0
 
@@ -635,8 +659,11 @@ def run_roam(args):
         while True:
             with lock:
                 if (stop_event.is_set()
+                        or stop_requested(args.stop_file)
                         or (deadline and time.time() >= deadline)
                         or stats["ok"] >= args.limit):
+                    if stop_requested(args.stop_file):
+                        stop_event.set()
                     return
             bv = None
             if q and rng.random() >= args.roam_jump:
@@ -652,7 +679,6 @@ def run_roam(args):
                 if empty_tries > 15:
                     return
                 continue
-            empty_tries = 0
             key = f"video:{bv}"
             with lock:
                 if key in run_seen or (refresh and key in seen_state
@@ -679,8 +705,11 @@ def run_roam(args):
             empty_tries = 0
             with lock:
                 if (stop_event.is_set()
+                        or stop_requested(args.stop_file)
                         or (deadline and time.time() >= deadline)
                         or stats["ok"] >= args.limit):
+                    if stop_requested(args.stop_file):
+                        stop_event.set()
                     return
                 out_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 out_file.flush()
@@ -710,7 +739,7 @@ def run_roam(args):
         reporter.join(timeout=1)
         out_file.close()
         state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
+        _save_state(state, state_path)
     print(f"roam 完成：成功 {stats['ok']}，失败 {stats['err']}；"
           f"跳转源: {','.join(jump.sources)}")
     return 0
@@ -729,6 +758,9 @@ def run_continuous(args):
           f"（Ctrl+C 优雅停止，再按一次强制退出）")
     round_no = 0
     while not stop.is_set():
+        if stop_requested(args.stop_file):
+            stop.set()
+            break
         round_no += 1
         args.max_seconds = args.sync_minutes * 60
         print(f"[continuous] ── 第 {round_no} 轮漫游（{args.sync_minutes} 分钟）──")
@@ -736,7 +768,13 @@ def run_continuous(args):
             run_roam(args)
         except KeyboardInterrupt:
             break
+        except Exception as e:
+            print(f"[continuous] 本轮异常（继续运行，下轮重试）: {e}")
+            continue
         if stop.is_set():
+            break
+        if stop_requested(args.stop_file):
+            stop.set()
             break
         print(f"[continuous] 本轮结束，同步到 git…")
         try:
@@ -805,6 +843,10 @@ def run_crawl(args):
             if stop_event.is_set():
                 print("[已停止] 提前结束本轮", file=sys.stderr)
                 break
+            if stop_requested(args.stop_file):
+                stop_event.set()
+                print("[已停止] 检测到停止标记 data/stop", file=sys.stderr)
+                break
             typ, ident, depth = queue.popleft()
             key = f"{typ}:{ident}"
             if key in processed:
@@ -837,7 +879,7 @@ def run_crawl(args):
         if reporter:
             reporter.join(timeout=1)
         state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
+        _save_state(state, state_path)
         for f in out.values():
             f.close()
     print(f"{'[已停止] ' if interrupted else ''}完成：本次新增 {sum(stats.values())} 条 {stats}，错误 {errors}")
@@ -890,6 +932,8 @@ def add_args(parser):
                         help="roam 模式：单次最多跑多少秒（0=不限）")
     parser.add_argument("--sync-minutes", type=int, default=30,
                         help="continuous 模式：每隔多少分钟构建索引并推送 git")
+    parser.add_argument("--stop-file", default="data/stop",
+                        help="停止标记文件：存在即安全退出（默认 data/stop）")
     parser.add_argument("--no-lock", action="store_true",
                         help="跳过单实例互斥锁（默认同目录只允许一个爬取进程）")
 
@@ -906,6 +950,9 @@ def main():
                   f"为避免重复爬取已退出；确认没有其他爬虫后删除该文件即可。", file=sys.stderr)
             return 1
     try:
+        stop_file = Path(args.stop_file)
+        if stop_file.exists():
+            stop_file.unlink()  # 清除上次遗留的停止标记
         if args.mode == "burst":
             return run_burst(args)
         if args.mode == "roam":
