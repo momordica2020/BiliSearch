@@ -5,7 +5,7 @@ import subprocess
 import sys
 import time
 
-from .crawl import add_args, run_burst, run_crawl
+from .crawl import add_args, run_burst, run_crawl, run_roam
 
 
 def build(args):
@@ -45,6 +45,11 @@ def main():
     args = parser.parse_args()
     if args.mode == "burst":
         rc = run_burst(args)
+        if args.build and rc == 0:
+            build(args)
+        return rc
+    if args.mode == "roam":
+        rc = run_roam(args)
         if args.build and rc == 0:
             build(args)
         return rc

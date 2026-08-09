@@ -48,6 +48,21 @@ def get_mixin_key(orig: str) -> str:
     return "".join(orig[i] for i in MIXIN_KEY_ENC_TAB)[:32]
 
 
+# av 号 -> BV 号（B 站 bvid 编码，字符表来自 bilibili-API-collect 实测版本）
+_BV_TABLE = "fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF"
+_BV_S = [11, 10, 3, 8, 4, 6]
+_BV_XOR = 177451812
+_BV_ADD = 8728348608
+
+
+def av2bv(aid):
+    x = (int(aid) ^ _BV_XOR) + _BV_ADD
+    bv = list("BV1??4?1?7??")
+    for i in range(6):
+        bv[_BV_S[i]] = _BV_TABLE[x // 58 ** i % 58]
+    return "".join(bv)
+
+
 class BiliClient:
     def __init__(self, state: dict, interval: float = 1.2, timeout: float = 15.0,
                  max_retries: int = 4):
@@ -261,5 +276,17 @@ class BiliClient:
         """分区排行榜（rid=0 全站，1 动画 / 3 音乐 / 4 游戏 / 5 娱乐 / 36 科技等）。"""
         data = self._get(
             "/x/web-interface/ranking/v2", {"rid": rid, "type": "all"}
+        ).get("data") or {}
+        return data.get("list") or []
+
+    def precious(self):
+        """入站必刷（约百条经典视频）。"""
+        data = self._get("/x/web-interface/popular/precious").get("data") or {}
+        return data.get("list") or []
+
+    def series(self, number=1):
+        """每周必看第 N 期（每期约 8 条）。"""
+        data = self._get(
+            "/x/web-interface/popular/series/one", {"number": number}
         ).get("data") or {}
         return data.get("list") or []

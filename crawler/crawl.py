@@ -13,6 +13,7 @@
 import argparse
 import json
 import math
+import random
 import re
 import sys
 import threading
@@ -21,7 +22,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .bili import BiliClient, BiliError
+from .bili import BiliClient, BiliError, av2bv
 
 RAW_FILES = {
     "video": "videos.jsonl",
@@ -402,6 +403,180 @@ def run_burst(args):
     return 0
 
 
+class _JumpBag:
+    """漫游模式的“随机跳转源”：跳出相关推荐的小圈子，覆盖全站。
+
+    sources 支持：
+      aid      —— 随机 av 号探测（按上传顺序近似均匀采样全站）
+      precious —— 入站必刷（经典视频）
+      series   —— 每周必看随机期数
+      popular  —— 热门榜随机页
+    """
+
+    def __init__(self, args, rng, lock):
+        self.args = args
+        self.rng = rng
+        self.lock = lock
+        self.sources = [s.strip() for s in (args.jump_sources or "aid").split(",") if s.strip()]
+        self.pools = {}
+        self.series_cache = {}
+
+    def _pool(self, c, name):
+        with self.lock:
+            if name in self.pools:
+                return self.pools[name]
+        items = []
+        try:
+            if name == "precious":
+                items = [v.get("bvid") for v in c.precious()]
+            elif name == "popular":
+                for pn in (1, 2, 3):
+                    items += [v.get("bvid") for v in c.popular(pn, 20)]
+        except BiliError:
+            pass
+        items = [b for b in items if b]
+        with self.lock:
+            self.pools[name] = items
+        return items
+
+    def get(self, c):
+        src = self.rng.choice(self.sources)
+        if src == "aid":
+            # 随机 av 探测：命中率取决于区间内现存稿件比例；最多试 3 次
+            for _ in range(3):
+                aid = self.rng.randint(self.args.aid_min, self.args.aid_max)
+                try:
+                    d = c.video(f"av{aid}")
+                    return d.get("bvid") or av2bv(aid)
+                except BiliError:
+                    continue
+            return None
+        if src == "series":
+            num = self.rng.randint(1, self.args.series_max)
+            with self.lock:
+                cached = self.series_cache.get(num)
+            if cached is None:
+                try:
+                    items = [v.get("bvid") for v in c.series(num)]
+                except BiliError:
+                    items = []
+                cached = [b for b in items if b]
+                with self.lock:
+                    self.series_cache[num] = cached
+            return self.rng.choice(cached) if cached else None
+        pool = self._pool(c, src)
+        return self.rng.choice(pool) if pool else None
+
+
+def run_roam(args):
+    """全站漫游：相关推荐随机游走 + 随机跳转源，近似覆盖全站视频。"""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    data_dir = Path(args.data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir = data_dir / "raw"
+    raw_dir.mkdir(exist_ok=True)
+    state_path = data_dir / "state.json"
+    state = {}
+    if state_path.exists():
+        state = json.loads(state_path.read_text("utf-8"))
+    if args.cookie and not state.get("cookie_extra"):
+        state["cookie_extra"] = args.cookie
+
+    client = BiliClient(state, interval=args.interval)
+    client._ensure_cookies()
+    client._ensure_wbi()
+
+    seen_state = state.setdefault("seen", {})
+    run_seen = set()
+    now = int(time.time())
+    refresh = args.refresh_days * 86400
+    lock = threading.Lock()
+    rng = random.Random()
+    jump = _JumpBag(args, rng, lock)
+
+    # 初始起点：种子/热门/排行榜等（与 burst 共用收集逻辑）
+    start_pool = collect_bv_seeds(args, client)
+    rng.shuffle(start_pool)
+
+    out_path = raw_dir / RAW_FILES["video"]
+    out_file = out_path.open("a", encoding="utf-8")
+    stats = {"ok": 0, "err": 0}
+    args.related = 20  # 漫游需要完整相关推荐列表做随机游走
+
+    def walker(wid):
+        q = []
+        c = BiliClient(state, interval=args.interval)
+        empty_tries = 0
+        while True:
+            with lock:
+                if stats["ok"] >= args.limit:
+                    return
+            bv = None
+            if q and rng.random() >= args.roam_jump:
+                bv = q.pop()
+            else:
+                bv = jump.get(c)
+            if not bv:
+                with lock:
+                    if start_pool:
+                        bv = start_pool.pop()
+            if not bv:
+                empty_tries += 1
+                if empty_tries > 15:
+                    return
+                continue
+            empty_tries = 0
+            key = f"video:{bv}"
+            with lock:
+                if key in run_seen or (refresh and key in seen_state
+                                       and now - int(seen_state[key]) < refresh):
+                    continue
+                run_seen.add(key)
+            try:
+                rec, neigh = fetch_item(c, "video", bv, args)
+            except BiliError as e:
+                with lock:
+                    stats["err"] += 1
+                if stats["err"] % 25 == 1:
+                    print(f"[skip] {key}: {e}")
+                continue
+            if not rec:
+                continue
+            with lock:
+                if stats["ok"] >= args.limit:
+                    return
+                out_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                out_file.flush()
+                seen_state[key] = now
+                stats["ok"] += 1
+            print(f"[ok] {key} | {rec['title'][:44]}")
+            vids = [nid for t, nid in neigh if t == "video"]
+            rng.shuffle(vids)
+            with lock:
+                for nid in vids[:args.fanout]:
+                    k2 = f"video:{nid}"
+                    if k2 not in run_seen and k2 not in seen_state and len(q) < args.fanout * 16:
+                        q.append(nid)
+
+    threads = []
+    for wid in range(max(1, args.workers)):
+        t = threading.Thread(target=walker, args=(wid,), daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+
+    out_file.close()
+    state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
+    print(f"roam 完成：成功 {stats['ok']}，失败 {stats['err']}；"
+          f"跳转源: {','.join(jump.sources)}")
+    return 0
+
+
 def run_crawl(args):
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -477,8 +652,9 @@ def run_crawl(args):
 
 
 def add_args(parser):
-    parser.add_argument("--mode", choices=["crawl", "scheduler", "burst"],
-                        default="crawl", help="crawl=图式爬取；burst=视频批量快抓；scheduler=常驻")
+    parser.add_argument("--mode", choices=["crawl", "scheduler", "burst", "roam"],
+                        default="crawl",
+                        help="crawl=图式爬取；burst=视频批量快抓；roam=全站漫游；scheduler=常驻")
     parser.add_argument("--data-dir", default="data", help="数据目录（默认 data）")
     parser.add_argument("--seeds", default="seeds.txt", help="种子文件路径")
     parser.add_argument("--seed", action="append", default=[], help="追加单条种子，可多次")
@@ -504,6 +680,17 @@ def add_args(parser):
                         help="burst 模式：从热门榜收集 N 个视频")
     parser.add_argument("--ranking", default="",
                         help="burst 模式：按 rid 收集排行榜（逗号分隔，0=全站）")
+    parser.add_argument("--roam-jump", type=float, default=0.2,
+                        help="roam 模式：每步随机跳转概率（默认 0.2）")
+    parser.add_argument("--jump-sources", default="aid,precious,series,popular",
+                        help="roam 模式：跳转源（aid/precious/series/popular，逗号分隔）")
+    parser.add_argument("--aid-min", type=int, default=1)
+    parser.add_argument("--aid-max", type=int, default=150000000,
+                        help="roam 模式：随机 av 探测区间上界")
+    parser.add_argument("--series-max", type=int, default=200,
+                        help="roam 模式：每周必看最大期数")
+    parser.add_argument("--fanout", type=int, default=3,
+                        help="roam 模式：每步随机选几条相关视频继续游走")
 
 
 def main():
@@ -512,6 +699,8 @@ def main():
     args = parser.parse_args()
     if args.mode == "burst":
         return run_burst(args)
+    if args.mode == "roam":
+        return run_roam(args)
     return run_crawl(args)
 
 

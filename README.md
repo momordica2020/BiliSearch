@@ -108,6 +108,42 @@ burst 模式参数：
 
 cookie 只保存在 `data/state.json`（已 gitignore），不要提交到仓库；建议使用个人小号，风险自负。
 
+## 全站漫游（roam 模式）
+
+想**不依赖具体种子、近似覆盖全站**地爬视频，用 roam：每个 worker 在“相关推荐”上随机游走，并以一定概率**跳转**到全站随机位置，避免永远困在热门/同主题小圈子里：
+
+```powershell
+# 默认：相关游走 + 20% 概率跳转（随机 av 探测 / 入站必刷 / 每周必看 / 热门）
+.\.venv\Scripts\python.exe -m crawler --mode roam --limit 300 --workers 6 --interval 0.6 --build
+
+# 只靠随机 av 号探测漫游（最“均匀”地扫过全站上传时间轴）
+.\.venv\Scripts\python.exe -m crawler --mode roam --limit 500 --workers 8 --interval 0.5 --jump-sources aid --roam-jump 1.0
+```
+
+roam 相关参数：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--roam-jump` | 0.2 | 每步跳转概率；1.0=纯跳转不做相关游走 |
+| `--jump-sources` | `aid,precious,series,popular` | 跳转源：`aid`=随机 av 号探测，`precious`=入站必刷，`series`=每周必看随机期数，`popular`=热门榜 |
+| `--aid-min/--aid-max` | 1 / 150000000 | 随机 av 探测区间（av 号按投稿顺序递增） |
+| `--series-max` | 200 | 每周必看最大期数 |
+| `--fanout` | 3 | 每步随机选几条相关视频继续游走 |
+
+**为什么是“近似全站”**：B 站没有公开的全量视频列表接口，无法一次性枚举所有视频。roam 用三种互补机制逼近全覆盖：
+
+1. **随机 av 号探测**：av 号基本按投稿时间递增，随机扫区间 = 对上传时间轴的近似均匀采样，天然覆盖非热门、老视频（实测命中率约 25%，其余多为已删除/私密稿件）；
+2. **相关推荐随机游走**：沿内容图扩散，跳出榜单但会偏向同类内容；
+3. **入站必刷/每周必看/热门**：提供经典与近期爆款跳板。
+
+要真正“铺满”全站，建议把 roam 加进定时任务长期跑（例如每 6 小时 500 条预算），配合 `refresh-days` 自动去重：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1 -Mode roam -Limit 500 -Workers 6 -Deploy
+```
+
+注意：随机 av 探测会产生较多 404 请求，风控更敏感，`--interval` 建议 ≥0.5s。
+
 ## 部署到 GitHub Pages
 
 仓库设置里把 Pages 的 Source 设为 `gh-pages` 分支，然后：

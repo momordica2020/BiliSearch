@@ -11,7 +11,7 @@ param(
     [string]$TaskName = "BiliSearch-Crawl",
     [int]$IntervalHours = 6,
     [int]$Limit = 300,
-    [ValidateSet("crawl", "burst")]
+    [ValidateSet("crawl", "burst", "roam")]
     [string]$Mode = "crawl",
     [int]$Popular = 0,
     [string]$Ranking = "",
@@ -35,6 +35,8 @@ if ($Mode -eq "burst") {
     $crawlArgs = "-m crawler --mode burst --build --data-dir `"$DataDir`" --workers $Workers --interval $IntervalSeconds"
     if ($Popular -gt 0) { $crawlArgs += " --popular $Popular" }
     if ($Ranking) { $crawlArgs += " --ranking `"$Ranking`"" }
+} elseif ($Mode -eq "roam") {
+    $crawlArgs = "-m crawler --mode roam --build --data-dir `"$DataDir`" --limit $Limit --workers $Workers --interval $IntervalSeconds --roam-jump 0.3 --fanout 2 --jump-sources aid,precious,series,popular"
 } else {
     $crawlArgs = "-m crawler --mode crawl --build --data-dir `"$DataDir`" --limit $Limit"
 }
