@@ -167,6 +167,11 @@ class BiliClient:
     def _ensure_cookies(self):
         if self._cookie:
             return
+        extra = self.state.get("cookie_extra", "")
+        if "SESSDATA=" in extra:
+            # 完整登录 cookie（含 SESSDATA/bili_ticket/bili_jct 等），整体直接使用
+            self._cookie = extra
+            return
         if not self.state.get("buvid3"):
             spi = self._bare_get("/x/frontend/finger/spi")
             if spi.get("code") != 0:
@@ -175,7 +180,6 @@ class BiliClient:
             self.state["buvid3"] = d.get("b_3")
             self.state["buvid4"] = d.get("b_4")
             self.state["b_nut"] = int(time.time())
-        extra = self.state.get("cookie_extra", "")
         self._cookie = (
             f"buvid3={self.state['buvid3']}; buvid4={self.state.get('buvid4', '')}; "
             f"b_nut={self.state.get('b_nut', int(time.time()))}"

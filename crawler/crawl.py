@@ -349,6 +349,8 @@ def run_burst(args):
         state = json.loads(state_path.read_text("utf-8"))
     if args.cookie and not state.get("cookie_extra"):
         state["cookie_extra"] = args.cookie
+    if args.cookies_file and Path(args.cookies_file).exists() and not state.get("cookie_extra"):
+        state["cookie_extra"] = Path(args.cookies_file).read_text("utf-8").strip()
 
     # 预热身份（cookie/WBI 密钥），避免多线程并发初始化竞态
     client = BiliClient(state, interval=args.interval)
@@ -484,6 +486,8 @@ def run_roam(args):
         state = json.loads(state_path.read_text("utf-8"))
     if args.cookie and not state.get("cookie_extra"):
         state["cookie_extra"] = args.cookie
+    if args.cookies_file and Path(args.cookies_file).exists() and not state.get("cookie_extra"):
+        state["cookie_extra"] = Path(args.cookies_file).read_text("utf-8").strip()
 
     client = BiliClient(state, interval=args.interval)
     client._ensure_cookies()
@@ -592,6 +596,8 @@ def run_crawl(args):
         state = json.loads(state_path.read_text("utf-8"))
     if args.cookie and not state.get("cookie_extra"):
         state["cookie_extra"] = args.cookie
+    if args.cookies_file and Path(args.cookies_file).exists() and not state.get("cookie_extra"):
+        state["cookie_extra"] = Path(args.cookies_file).read_text("utf-8").strip()
     client = BiliClient(state, interval=args.interval)
     seen_state = state.setdefault("seen", {})
     now = int(time.time())
@@ -672,6 +678,8 @@ def add_args(parser):
     parser.add_argument("--neighbor-articles", type=int, default=5)
     parser.add_argument("--related", type=int, default=5, help="每个视频最多取几条相关推荐")
     parser.add_argument("--cookie", default="", help="追加 cookie（如 SESSDATA=...）")
+    parser.add_argument("--cookies-file", default="data/cookies.txt",
+                        help="完整 cookie 文件（gitignore，自动加载；含 SESSDATA 时整体使用）")
     parser.add_argument("--workers", type=int, default=4,
                         help="burst 模式并发 worker 数（默认 4；有 SESSDATA 可到 8-12）")
     parser.add_argument("--bv-file", default=None,

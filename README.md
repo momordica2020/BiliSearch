@@ -106,7 +106,13 @@ burst 模式参数：
 .\.venv\Scripts\python.exe -m crawler --mode burst --popular 500 --workers 12 --interval 0.3 --cookie "SESSDATA=xxxx"
 ```
 
-cookie 只保存在 `data/state.json`（已 gitignore），不要提交到仓库；建议使用个人小号，风险自负。
+更推荐把**完整 cookie**（浏览器 F12 复制整段，含 SESSDATA/bili_ticket 等）存到 `data/cookies.txt`——爬虫每次运行自动加载并整体使用，无需写在命令行里：
+
+```powershell
+# 直接把整段 cookie 粘贴进 data/cookies.txt 保存即可
+```
+
+`data/cookies.txt` 与 `data/state.json` 都已 gitignore，不会进仓库。注意：cookie 是登录凭证，**不要外传**；如果曾在聊天/日志中分享过，建议在 B 站重新登录使旧 SESSDATA 失效后再更新本文件。
 
 ## 全站漫游（roam 模式）
 

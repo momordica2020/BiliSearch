@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 data/raw/
 data/state.json
+data/cookies.txt
 site/data/
 .worktrees/
 .DS_Store
-
