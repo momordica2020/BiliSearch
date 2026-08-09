@@ -16,6 +16,7 @@ import math
 import os
 import random
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -55,7 +56,7 @@ class ProgressReporter(threading.Thread):
                 err = self.stats.get("err", 0)
             done = ok + err
             rate = done / elapsed * 60 if elapsed > 1 else 0.0
-            total = self.total if self.total is not None else "?"
+            total = self.total if (self.total is not None and self.total < 10 ** 8) else "?"
             line = (f"[进度 {self.label}] {elapsed:.0f}s | {done}/{total} | "
                     f"成功 {ok} 失败 {err} | {rate:.0f} 条/分")
             if tty:
@@ -587,6 +588,7 @@ def run_roam(args):
     install_sigint(stop_event)
     reporter = ProgressReporter(stop_event, lock, stats, total=args.limit, label="roam")
     reporter.start()
+    deadline = time.time() + args.max_seconds if args.max_seconds > 0 else None
 
     def walker(wid):
         q = []
@@ -594,7 +596,9 @@ def run_roam(args):
         empty_tries = 0
         while True:
             with lock:
-                if stop_event.is_set() or stats["ok"] >= args.limit:
+                if (stop_event.is_set()
+                        or (deadline and time.time() >= deadline)
+                        or stats["ok"] >= args.limit):
                     return
             bv = None
             if q and rng.random() >= args.roam_jump:
@@ -628,7 +632,9 @@ def run_roam(args):
             if not rec:
                 continue
             with lock:
-                if stop_event.is_set() or stats["ok"] >= args.limit:
+                if (stop_event.is_set()
+                        or (deadline and time.time() >= deadline)
+                        or stats["ok"] >= args.limit):
                     return
                 out_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 out_file.flush()
@@ -661,6 +667,41 @@ def run_roam(args):
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
     print(f"roam 完成：成功 {stats['ok']}，失败 {stats['err']}；"
           f"跳转源: {','.join(jump.sources)}")
+    return 0
+
+
+def run_continuous(args):
+    """24 小时不间断漫游：每 sync-minutes 分钟构建索引并推送到 git。"""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    stop = threading.Event()
+    install_sigint(stop)
+    args.limit = 10 ** 9  # 不限条数，由时间片控制
+    print(f"[continuous] 24h 不间断漫游开始；每 {args.sync_minutes} 分钟同步一次 git"
+          f"（Ctrl+C 优雅停止，再按一次强制退出）")
+    round_no = 0
+    while not stop.is_set():
+        round_no += 1
+        args.max_seconds = args.sync_minutes * 60
+        print(f"[continuous] ── 第 {round_no} 轮漫游（{args.sync_minutes} 分钟）──")
+        try:
+            run_roam(args)
+        except KeyboardInterrupt:
+            break
+        if stop.is_set():
+            break
+        print(f"[continuous] 本轮结束，同步到 git…")
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", "scripts/deploy.ps1", "-Push"],
+                check=False,
+            )
+        except Exception as e:
+            print(f"[continuous] 同步失败（下一轮会重试）: {e}")
+    print("[continuous] 已退出")
     return 0
 
 
@@ -758,9 +799,9 @@ def run_crawl(args):
 
 
 def add_args(parser):
-    parser.add_argument("--mode", choices=["crawl", "scheduler", "burst", "roam"],
+    parser.add_argument("--mode", choices=["crawl", "scheduler", "burst", "roam", "continuous"],
                         default="crawl",
-                        help="crawl=图式爬取；burst=视频批量快抓；roam=全站漫游；scheduler=常驻")
+                        help="crawl=图式爬取；burst=批量快抓；roam=全站漫游；continuous=24h 不间断；scheduler=常驻")
     parser.add_argument("--data-dir", default="data", help="数据目录（默认 data）")
     parser.add_argument("--seeds", default="seeds.txt", help="种子文件路径")
     parser.add_argument("--seed", action="append", default=[], help="追加单条种子，可多次")
@@ -799,6 +840,10 @@ def add_args(parser):
                         help="roam 模式：每周必看最大期数")
     parser.add_argument("--fanout", type=int, default=3,
                         help="roam 模式：每步随机选几条相关视频继续游走")
+    parser.add_argument("--max-seconds", type=float, default=0,
+                        help="roam 模式：单次最多跑多少秒（0=不限）")
+    parser.add_argument("--sync-minutes", type=int, default=30,
+                        help="continuous 模式：每隔多少分钟构建索引并推送 git")
 
 
 def main():
@@ -809,6 +854,8 @@ def main():
         return run_burst(args)
     if args.mode == "roam":
         return run_roam(args)
+    if args.mode == "continuous":
+        return run_continuous(args)
     return run_crawl(args)
 
 

@@ -49,11 +49,14 @@ Copy-Item -Path (Join-Path $root "site\*") -Destination $wt -Recurse -Force
 
 Push-Location $wt
 git add -A
+if ($LASTEXITCODE -ne 0) { Pop-Location; throw "git add 失败" }
 git -c user.name="BiliSearch Bot" -c user.email="bot@localhost" `
     commit -m "site: update $(Get-Date -Format 'yyyy-MM-dd HH:mm')" --allow-empty
+if ($LASTEXITCODE -ne 0) { Pop-Location; throw "git commit 失败" }
 if ($Push) {
     Write-Host "==> 推送 $Remote/gh-pages"
     git push $Remote gh-pages --force
+    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "git push 失败（请检查 GitHub 凭据）" }
 }
 Pop-Location
 

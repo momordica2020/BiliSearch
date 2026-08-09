@@ -5,7 +5,7 @@ import subprocess
 import sys
 import time
 
-from .crawl import add_args, run_burst, run_crawl, run_roam
+from .crawl import add_args, run_burst, run_continuous, run_crawl, run_roam
 
 
 def build(args):
@@ -53,6 +53,8 @@ def main():
         if args.build and rc == 0:
             build(args)
         return rc
+    if args.mode == "continuous":
+        return run_continuous(args)
     if args.mode == "scheduler":
         scheduler_loop(args)
         return 0

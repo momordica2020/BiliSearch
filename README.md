@@ -82,6 +82,21 @@ python -m http.server 8080 -d site
 - 三种模式（crawl / burst / roam）都会**每 5 秒打印一行整体进度**：`[进度 roam] 37s | 300/300 | 成功 300 失败 0 | 486 条/分`（终端里原地刷新，管道/日志里逐行输出）
 - **Ctrl+C**：第一次按下会优雅停止（当前请求结束后保存状态退出），第二次立即强制退出（退出码 130）
 
+## 24 小时不间断爬取（continuous 模式）
+
+在终端里跑一条命令即可**全天候漫游**，每隔 N 分钟自动构建索引并推送到 git：
+
+```powershell
+.\.venv\Scripts\python.exe -m crawler --mode continuous --sync-minutes 30 --workers 8 --interval 0.4
+```
+
+- `--sync-minutes`：每隔多少分钟同步一次（构建索引 + `deploy.ps1 -Push` 推送到 gh-pages），默认 30
+- 每轮漫游按时间片运行，`refresh-days` 自动去重，已抓过的视频不会重复抓
+- 循环持续到 Ctrl+C：第一次优雅停止并保存状态，第二次强制退出（退出码 130）
+- 某次同步失败（网络/凭据问题）不影响爬取，下一轮会自动重试
+- 运行 continuous 前建议先停掉定时任务，避免两套爬取并发重复抓取：
+  `Unregister-ScheduledTask -TaskName BiliSearch-Crawl`
+
 ## 视频批量快抓（burst 模式）
 
 想快速铺量视频数据时用 burst：**多线程并发，只抓视频元数据本身**，不展开作者/动态/专栏。视频 ID 来源可以是列表文件、热门榜、分区排行榜：
