@@ -13,14 +13,15 @@
 import argparse
 import json
 import math
+import os
 import random
 import re
 import sys
 import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from queue import Empty, Queue
 
 from .bili import BiliClient, BiliError, av2bv
 
@@ -30,6 +31,57 @@ RAW_FILES = {
     "dynamic": "dynamics.jsonl",
     "article": "articles.jsonl",
 }
+
+
+class ProgressReporter(threading.Thread):
+    """每 interval 秒输出一次整体进度；TTY 下用 \r 原地刷新。"""
+
+    def __init__(self, stop_event, lock, stats, total=None, interval=5.0, label=""):
+        super().__init__(daemon=True)
+        self.stop_event = stop_event
+        self.lock = lock
+        self.stats = stats
+        self.total = total
+        self.interval = interval
+        self.label = label
+        self.started = time.time()
+
+    def run(self):
+        tty = sys.stdout.isatty()
+        while not self.stop_event.wait(self.interval):
+            elapsed = time.time() - self.started
+            with self.lock:
+                ok = self.stats.get("ok", 0)
+                err = self.stats.get("err", 0)
+            done = ok + err
+            rate = done / elapsed * 60 if elapsed > 1 else 0.0
+            total = self.total if self.total is not None else "?"
+            line = (f"[进度 {self.label}] {elapsed:.0f}s | {done}/{total} | "
+                    f"成功 {ok} 失败 {err} | {rate:.0f} 条/分")
+            if tty:
+                sys.stdout.write("\r" + line + " " * 8)
+            else:
+                sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+        if tty:
+            sys.stdout.write("\r" + " " * 80 + "\r")
+            sys.stdout.flush()
+
+
+def install_sigint(stop_event):
+    """第一次 Ctrl+C 优雅停止（当前请求结束后退出）；第二次强制退出。"""
+    import signal
+
+    def handler(signum, frame):
+        if getattr(handler, "pressed", False):
+            print("\n[强制退出]", file=sys.stderr)
+            os._exit(130)
+        handler.pressed = True
+        stop_event.set()
+        print("\n[Ctrl+C] 正在停止（当前请求结束后退出），再按一次强制退出…", file=sys.stderr)
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, handler)
 
 VIDEO_RE = re.compile(r"(BV[0-9A-Za-z]{10}|av\d+)", re.I)
 MID_RE = re.compile(r"(?:mid|uid)\s*[:：]?\s*(\d+)", re.I)
@@ -376,32 +428,54 @@ def run_burst(args):
     out_file = out_path.open("a", encoding="utf-8")
     lock = threading.Lock()
     stats = {"ok": 0, "err": 0}
+    stop_event = threading.Event()
+    install_sigint(stop_event)
+    work_queue = Queue()
+    for bv in todo:
+        work_queue.put(bv)
+    reporter = ProgressReporter(stop_event, lock, stats, total=len(todo), label="burst")
+    reporter.start()
 
-    def work(bv):
-        key = f"video:{bv}"
-        try:
-            c = BiliClient(state, interval=args.interval)
-            rec, _ = fetch_item(c, "video", bv, args)
-            if rec:
-                with lock:
-                    out_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                    out_file.flush()
-                    seen_state[key] = now
-                    stats["ok"] += 1
-                print(f"[ok] {key} | {rec['title'][:48]}")
+    def worker():
+        c = BiliClient(state, interval=args.interval)
+        while not stop_event.is_set():
+            try:
+                bv = work_queue.get_nowait()
+            except Empty:
                 return
-        except BiliError as e:
+            key = f"video:{bv}"
+            try:
+                rec, _ = fetch_item(c, "video", bv, args)
+            except BiliError as e:
+                with lock:
+                    stats["err"] += 1
+                print(f"[skip] {key}: {e}")
+                continue
+            if not rec:
+                continue
             with lock:
-                stats["err"] += 1
-            print(f"[skip] {key}: {e}")
+                out_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                out_file.flush()
+                seen_state[key] = now
+                stats["ok"] += 1
+            print(f"[ok] {key} | {rec['title'][:48]}")
 
-    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
-        list(ex.map(work, todo))
-
-    out_file.close()
-    state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
-    print(f"burst 完成：成功 {stats['ok']}，失败 {stats['err']}")
+    threads = [threading.Thread(target=worker, daemon=True)
+               for _ in range(max(1, args.workers))]
+    for t in threads:
+        t.start()
+    try:
+        for t in threads:
+            t.join()
+    except KeyboardInterrupt:
+        print("\n[已停止] 正在保存状态…", file=sys.stderr)
+    finally:
+        stop_event.set()
+        reporter.join(timeout=1)
+        out_file.close()
+        state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
+    print(f"burst 结束：成功 {stats['ok']}，失败 {stats['err']}")
     return 0
 
 
@@ -509,6 +583,10 @@ def run_roam(args):
     out_file = out_path.open("a", encoding="utf-8")
     stats = {"ok": 0, "err": 0}
     args.related = 20  # 漫游需要完整相关推荐列表做随机游走
+    stop_event = threading.Event()
+    install_sigint(stop_event)
+    reporter = ProgressReporter(stop_event, lock, stats, total=args.limit, label="roam")
+    reporter.start()
 
     def walker(wid):
         q = []
@@ -516,7 +594,7 @@ def run_roam(args):
         empty_tries = 0
         while True:
             with lock:
-                if stats["ok"] >= args.limit:
+                if stop_event.is_set() or stats["ok"] >= args.limit:
                     return
             bv = None
             if q and rng.random() >= args.roam_jump:
@@ -550,7 +628,7 @@ def run_roam(args):
             if not rec:
                 continue
             with lock:
-                if stats["ok"] >= args.limit:
+                if stop_event.is_set() or stats["ok"] >= args.limit:
                     return
                 out_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 out_file.flush()
@@ -570,12 +648,17 @@ def run_roam(args):
         t = threading.Thread(target=walker, args=(wid,), daemon=True)
         t.start()
         threads.append(t)
-    for t in threads:
-        t.join()
-
-    out_file.close()
-    state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
+    try:
+        for t in threads:
+            t.join()
+    except KeyboardInterrupt:
+        print("\n[已停止] 正在保存状态…", file=sys.stderr)
+    finally:
+        stop_event.set()
+        reporter.join(timeout=1)
+        out_file.close()
+        state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
     print(f"roam 完成：成功 {stats['ok']}，失败 {stats['err']}；"
           f"跳转源: {','.join(jump.sources)}")
     return 0
@@ -617,14 +700,24 @@ def run_crawl(args):
         return 1
 
     out = {}
+    stats = {"video": 0, "user": 0, "dynamic": 0, "article": 0}
+    errors = 0
+    stop_event = threading.Event()
+    install_sigint(stop_event)
+    lock = threading.Lock()
+    reporter = None
+    interrupted = False
     try:
         for typ, fname in RAW_FILES.items():
             out[typ] = (raw_dir / fname).open("a", encoding="utf-8")
         queue = deque((t, i, args.depth) for t, i in seeds)
         processed = set()
-        stats = {"video": 0, "user": 0, "dynamic": 0, "article": 0}
-        errors = 0
+        reporter = ProgressReporter(stop_event, lock, stats, total=args.limit, label="crawl")
+        reporter.start()
         while queue and sum(stats.values()) < args.limit:
+            if stop_event.is_set():
+                print("[已停止] 提前结束本轮", file=sys.stderr)
+                break
             typ, ident, depth = queue.popleft()
             key = f"{typ}:{ident}"
             if key in processed:
@@ -642,19 +735,26 @@ def run_crawl(args):
                 continue
             out[rec["type"]].write(json.dumps(rec, ensure_ascii=False) + "\n")
             out[rec["type"]].flush()
-            stats[rec["type"]] += 1
+            with lock:
+                stats[rec["type"]] += 1
             seen_state[key] = now
             print(f"[ok] {key} | {rec['title'][:48]} | {rec['url']}")
             if depth > 0:
                 for nt, nid in neigh:
                     queue.append((nt, nid, depth - 1))
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n[已停止] 正在保存状态…", file=sys.stderr)
+    finally:
+        stop_event.set()
+        if reporter:
+            reporter.join(timeout=1)
         state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1), "utf-8")
-        print(f"完成：本次新增 {sum(stats.values())} 条 {stats}，错误 {errors}")
-        return 0
-    finally:
         for f in out.values():
             f.close()
+    print(f"{'[已停止] ' if interrupted else ''}完成：本次新增 {sum(stats.values())} 条 {stats}，错误 {errors}")
+    return 0
 
 
 def add_args(parser):
