@@ -88,16 +88,22 @@ def install_sigint(stop_event):
 def acquire_lock(lock_path):
     """进程级互斥锁：防止误开多个爬取进程（同文件同时跑会重复抓取并互相覆盖状态）。
     返回锁文件句柄；已被占用时返回 None。"""
-    lock_path = Path(lock_path)
+    lock_path = Path(lock_path).resolve()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # r+：不截断；不存在时用 "x"（O_EXCL）原子创建，避免与竞争者互相截断
     try:
         f = lock_path.open("r+", encoding="utf-8")
     except FileNotFoundError:
-        f = lock_path.open("w", encoding="utf-8")
-        f.write("0")
-        f.flush()
-    f.seek(0)
+        try:
+            f = lock_path.open("x", encoding="utf-8")
+        except FileExistsError:
+            f = lock_path.open("r+", encoding="utf-8")
     try:
+        f.seek(0)
+        if not f.read(1):
+            f.write("0")  # 保证至少 1 字节可锁
+            f.flush()
+        f.seek(0)
         if os.name == "nt":
             import msvcrt
             msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
