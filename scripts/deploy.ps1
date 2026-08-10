@@ -36,7 +36,7 @@ if (-not (Test-Path (Join-Path $wt ".git"))) {
         git worktree add --detach $wt
         Push-Location $wt
         git switch --orphan gh-pages
-        git rm -rf --quiet . 2>$null
+        git rm -rf --quiet .
         Pop-Location
     }
 }
@@ -48,17 +48,36 @@ Get-ChildItem -LiteralPath $wt -Force | Where-Object { $_.Name -ne ".git" } | Fo
 Copy-Item -Path (Join-Path $root "site\*") -Destination $wt -Recurse -Force
 
 Push-Location $wt
+git config http.postBuffer 524288000
+# 快照式发布：每次生成"单一根提交"替换 gh-pages 历史，
+# 避免 git 历史随索引增长无限膨胀（此前已因此涨到 1.7GB）
+if ((git branch --show-current) -ne "_snapshot") {
+    git branch -D _snapshot
+    git checkout --orphan _snapshot
+    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "创建快照分支失败" }
+}
 git add -A
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw "git add 失败" }
 git -c user.name="BiliSearch Bot" -c user.email="bot@localhost" `
     commit -m "site: update $(Get-Date -Format 'yyyy-MM-dd HH:mm')" --allow-empty
 if ($LASTEXITCODE -ne 0) { Pop-Location; throw "git commit 失败" }
+git branch -f gh-pages HEAD
+git checkout gh-pages
+git branch -D _snapshot
 if ($Push) {
-    Write-Host "==> 推送 $Remote/gh-pages"
-    git push $Remote gh-pages --force
-    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "git push 失败（请检查 GitHub 凭据）" }
+    Write-Host "==> 推送 $Remote/gh-pages（快照式，历史仅 1 个提交）"
+    git push --force $Remote gh-pages
+    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "git push 失败（请检查 GitHub 凭据/网络）" }
 }
 Pop-Location
+
+$dataSize = (Get-ChildItem (Join-Path $root "site\data") -Recurse -File | Measure-Object Length -Sum).Sum
+$sizeMB = [math]::Round($dataSize / 1MB)
+if ($sizeMB -gt 900) {
+    Write-Warning "索引已达 ${sizeMB}MB，接近 GitHub Pages 1GB 软上限！请考虑 --desc-len 0 或多仓库分片。"
+} elseif ($sizeMB -gt 300) {
+    Write-Warning "索引 ${sizeMB}MB，推送体积较大，建议提高 --sync-minutes 或使用 --desc-len 0。"
+}
 
 Write-Host "完成。站点目录：$wt"
 if (-not $Push) { Write-Host "加上 -Push 参数即可推送到 $Remote/gh-pages" }

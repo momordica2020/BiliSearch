@@ -783,6 +783,9 @@ def run_continuous(args):
                  "-File", "scripts/deploy.ps1", "-Push"],
                 check=False,
             )
+        except KeyboardInterrupt:
+            print("\n[已停止] 同步中断，爬虫退出", file=sys.stderr)
+            break
         except Exception as e:
             print(f"[continuous] 同步失败（下一轮会重试）: {e}")
     print("[continuous] 已退出")
