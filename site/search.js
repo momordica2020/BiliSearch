@@ -338,7 +338,7 @@
           continue;
         }
         for (const [key, arr] of m) {
-          if (isSingleCjk ? key[0] === tok : (key.length > tok.length && key.startsWith(tok))) {
+          if (isSingleCjk ? key[0] === tok : (key.length >= tok.length && key.startsWith(tok))) {
             for (const { cnt, shard } of arr) {
               out.set(shard, (out.get(shard) || 0) + cnt);
             }
