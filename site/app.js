@@ -141,9 +141,11 @@
     render(items);
     els.more.style.display = total > items.length ? "block" : "none";
     if (routing) {
+      const totalShards = engine.meta.shardCount || engine.meta.shards.length;
+      const pct = res.candidates ? Math.round((res.scanned / res.candidates) * 100) : 100;
       const cov = res.partial
-        ? `已检索 ${res.scanned}/${res.candidates} 个分片（结果可能不完整）`
-        : `已检索 ${res.scanned}/${res.candidates} 个分片`;
+        ? `已检索 ${res.scanned}/${res.candidates} 候选分片（${pct}%，结果可能不完整）· 全库 ${totalShards} 分片`
+        : `已检索 ${res.scanned}/${res.candidates} 候选分片 · 全库 ${totalShards} 分片`;
       setLoading("搜索完成 · " + cov + (res.bytes ? " · " + (res.bytes / 1048576).toFixed(1) + "MB" : ""));
     }
   }

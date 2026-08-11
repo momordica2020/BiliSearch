@@ -274,6 +274,51 @@ def dynamic_record(item):
     return rec, neigh
 
 
+def derive_user_rec(vrec):
+    """从视频记录派生 UP 主记录（零额外请求，作者名/ID 来自视频响应）。"""
+    mid = vrec.get("author_id")
+    name = vrec.get("author")
+    if not mid or not name:
+        return None
+    return _rec("user", "mid:" + str(mid), name, name, mid, "",
+                f"https://space.bilibili.com/{mid}", 0, "UP主")
+
+
+def fetch_author_side(client, mid, args):
+    """漫游用轻量作者扩展：只抓资料 + 少量专栏/动态，不抓其投稿视频。"""
+    name, sign = "", ""
+    try:
+        d = client.user(mid)
+        name, sign = d.get("name") or "", d.get("sign") or ""
+    except BiliError:
+        try:
+            d = client.user_card(mid)
+            name, sign = d.get("name") or "", d.get("sign") or ""
+        except BiliError:
+            pass
+    if not name:
+        name = f"UID {mid}"
+    rec = _rec("user", "mid:" + str(mid), name, name, mid, sign,
+               f"https://space.bilibili.com/{mid}", 0, "UP主")
+    neigh = []
+    try:
+        arts, _ = client.user_articles(mid, 1, args.ps)
+        for a in arts[:args.neighbor_articles]:
+            if a.get("id"):
+                neigh.append(("article", "cv" + str(a["id"])))
+    except BiliError:
+        pass
+    try:
+        items, has_more, offset = client.user_dynamics(mid)
+        for it in items[:args.neighbor_dynamics]:
+            nid = it.get("id_str")
+            if nid:
+                neigh.append(("dynamic", str(nid)))
+    except BiliError:
+        pass
+    return rec, neigh
+
+
 def fetch_item(client, typ, ident, args):
     """抓取一个实体，返回 (记录, 邻居列表)；失败抛 BiliError。"""
     if typ == "video":
@@ -484,10 +529,12 @@ def run_burst(args):
         print("没有需要抓取的视频（都在 refresh-days 内）")
         return 0
 
-    out_path = raw_dir / RAW_FILES["video"]
-    out_file = out_path.open("a", encoding="utf-8")
+    out_files = {}
+    for typ, fname in RAW_FILES.items():
+        out_files[typ] = (raw_dir / fname).open("a", encoding="utf-8")
     lock = threading.Lock()
     stats = {"ok": 0, "err": 0}
+    derived_users = set()
     stop_event = threading.Event()
     install_sigint(stop_event)
     work_queue = Queue()
@@ -517,10 +564,15 @@ def run_burst(args):
             if not rec:
                 continue
             with lock:
-                out_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                out_file.flush()
+                out_files["video"].write(json.dumps(rec, ensure_ascii=False) + "\n")
+                out_files["video"].flush()
                 seen_state[key] = now
                 stats["ok"] += 1
+                urec = derive_user_rec(rec)
+                if urec and urec["id"] not in derived_users and urec["id"] not in seen_state:
+                    derived_users.add(urec["id"])
+                    out_files["user"].write(json.dumps(urec, ensure_ascii=False) + "\n")
+                    out_files["user"].flush()
             print(f"[ok] {key} | {rec['title'][:48]}")
 
     threads = [threading.Thread(target=worker, daemon=True)
@@ -535,7 +587,8 @@ def run_burst(args):
     finally:
         stop_event.set()
         reporter.join(timeout=1)
-        out_file.close()
+        for f in out_files.values():
+            f.close()
         state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
         _save_state(state, state_path)
     print(f"burst 结束：成功 {stats['ok']}，失败 {stats['err']}")
@@ -642,9 +695,11 @@ def run_roam(args):
     start_pool = collect_bv_seeds(args, client)
     rng.shuffle(start_pool)
 
-    out_path = raw_dir / RAW_FILES["video"]
-    out_file = out_path.open("a", encoding="utf-8")
+    out_files = {}
+    for typ, fname in RAW_FILES.items():
+        out_files[typ] = (raw_dir / fname).open("a", encoding="utf-8")
     stats = {"ok": 0, "err": 0}
+    derived_users = set()
     args.related = 20  # 漫游需要完整相关推荐列表做随机游走
     stop_event = threading.Event()
     install_sigint(stop_event)
@@ -665,21 +720,26 @@ def run_roam(args):
                     if stop_requested(args.stop_file):
                         stop_event.set()
                     return
-            bv = None
+            item = None
             if q and rng.random() >= args.roam_jump:
-                bv = q.pop()
+                item = q.pop()
             else:
-                bv = jump.get(c)
-            if not bv:
+                item = jump.get(c)
+                if item:
+                    item = ("video", item)
+            if item is None and q:
+                item = q.pop()
+            if not item:
                 with lock:
                     if start_pool:
-                        bv = start_pool.pop()
-            if not bv:
+                        item = ("video", start_pool.pop())
+            if not item:
                 empty_tries += 1
                 if empty_tries > 15:
                     return
                 continue
-            key = f"video:{bv}"
+            typ, ident = item
+            key = f"{typ}:{ident}"
             with lock:
                 if key in run_seen or (refresh and key in seen_state
                                        and now - int(seen_state[key]) < refresh):
@@ -689,7 +749,10 @@ def run_roam(args):
                     continue
                 run_seen.add(key)
             try:
-                rec, neigh = fetch_item(c, "video", bv, args)
+                if typ == "user":
+                    rec, neigh = fetch_author_side(c, ident, args)
+                else:
+                    rec, neigh = fetch_item(c, typ, ident, args)
             except BiliError as e:
                 empty_tries += 1
                 with lock:
@@ -711,18 +774,33 @@ def run_roam(args):
                     if stop_requested(args.stop_file):
                         stop_event.set()
                     return
-                out_file.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                out_file.flush()
+                out_files[rec["type"]].write(json.dumps(rec, ensure_ascii=False) + "\n")
+                out_files[rec["type"]].flush()
                 seen_state[key] = now
                 stats["ok"] += 1
             print(f"[ok] {key} | {rec['title'][:44]}")
-            vids = [nid for t, nid in neigh if t == "video"]
-            rng.shuffle(vids)
             with lock:
-                for nid in vids[:args.fanout]:
-                    k2 = f"video:{nid}"
-                    if k2 not in run_seen and k2 not in seen_state and len(q) < args.fanout * 16:
-                        q.append(nid)
+                if typ == "video":
+                    # 派生 UP 主记录（零额外请求）
+                    urec = derive_user_rec(rec)
+                    if urec and urec["id"] not in derived_users and urec["id"] not in seen_state:
+                        derived_users.add(urec["id"])
+                        out_files["user"].write(json.dumps(urec, ensure_ascii=False) + "\n")
+                        out_files["user"].flush()
+                        # 小概率扩展该作者：收集其专栏/动态
+                        if rng.random() < args.author_expand and rec.get("author_id"):
+                            q.append(("user", str(rec["author_id"])))
+                    vids = [nid for t, nid in neigh if t == "video"]
+                    rng.shuffle(vids)
+                    for nid in vids[:args.fanout]:
+                        k2 = f"video:{nid}"
+                        if k2 not in run_seen and k2 not in seen_state and len(q) < args.fanout * 16:
+                            q.append(("video", nid))
+                else:
+                    for nt, nid in neigh:
+                        k2 = f"{nt}:{nid}"
+                        if k2 not in run_seen and k2 not in seen_state and len(q) < args.fanout * 16:
+                            q.append((nt, nid))
 
     threads = []
     for wid in range(max(1, args.workers)):
@@ -737,7 +815,8 @@ def run_roam(args):
     finally:
         stop_event.set()
         reporter.join(timeout=1)
-        out_file.close()
+        for f in out_files.values():
+            f.close()
         state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
         _save_state(state, state_path)
     print(f"roam 完成：成功 {stats['ok']}，失败 {stats['err']}；"
@@ -931,6 +1010,8 @@ def add_args(parser):
                         help="roam 模式：每周必看最大期数")
     parser.add_argument("--fanout", type=int, default=3,
                         help="roam 模式：每步随机选几条相关视频继续游走")
+    parser.add_argument("--author-expand", type=float, default=0.05,
+                        help="roam 模式：抓到视频后扩展其作者的概率（收集专栏/动态）")
     parser.add_argument("--max-seconds", type=float, default=0,
                         help="roam 模式：单次最多跑多少秒（0=不限）")
     parser.add_argument("--sync-minutes", type=int, default=30,
