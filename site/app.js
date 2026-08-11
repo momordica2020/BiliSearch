@@ -20,6 +20,7 @@
   const state = { q: "", type: "all", sort: "relevance", page: 1, pageSize: 50, rows: [] };
   let debounce = null;
   let ready = false;
+  let searchSeq = 0;
 
   function init() {
     els.input.addEventListener("input", () => {
@@ -119,10 +120,18 @@
     });
   }
 
-  function runSearch() {
+  async function runSearch() {
     if (!ready) return;
     const types = state.type === "all" ? null : [state.type];
-    const res = engine.search(state.q, { types, limit: state.page * state.pageSize });
+    const seq = ++searchSeq;
+    let res;
+    try {
+      res = await engine.search(state.q, { types, limit: state.page * state.pageSize });
+    } catch (e) {
+      setLoading("搜索失败：" + e.message);
+      return;
+    }
+    if (seq !== searchSeq) return;  // 丢弃过期结果
     const total = res.total;
     let items = res.items;
     if (state.sort === "date") {
