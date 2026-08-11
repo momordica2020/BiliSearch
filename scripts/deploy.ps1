@@ -9,6 +9,7 @@
 param(
     [string]$Remote = "origin",
     [switch]$Push,
+    [switch]$SkipBuild,
     [string]$Worktree = ".worktrees/gh-pages"
 )
 $ErrorActionPreference = "Stop"
@@ -26,14 +27,16 @@ if (-not $wt.StartsWith($root + $sep)) {
 
 Write-Host "==> 构建索引"
 $cfgPath = Join-Path $root "deploy.config.json"
-if (Test-Path $cfgPath) {
+if ($SkipBuild) {
+    Write-Host "==> 跳过构建（使用现有 site/data）"
+} elseif (Test-Path $cfgPath) {
     $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
     Write-Host "==> 使用 deploy.config.json 构建参数"
     & python build_index.py $cfg.buildArgs
 } else {
     & python build_index.py
 }
-if ($LASTEXITCODE -ne 0) { throw "build_index.py 失败" }
+if (-not $SkipBuild -and $LASTEXITCODE -ne 0) { throw "build_index.py 失败" }
 
 if (Test-Path $cfgPath) {
     Write-Host "==> 发布外部托管的分片组"

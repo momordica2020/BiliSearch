@@ -62,6 +62,19 @@
     return await res.text();
   }
 
+  async function poolMap(items, limit, fn) {
+    const out = new Array(items.length);
+    let next = 0;
+    async function worker() {
+      while (next < items.length) {
+        const i = next++;
+        out[i] = await fn(items[i], i);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+    return out;
+  }
+
   function addTo(map, token, docIdx, weight) {
     let m = map.get(token);
     if (!m) {
@@ -261,6 +274,7 @@
       this.meta = null;
       this.metaUrl = "";
       this.dirCache = new Map();
+      this.dataCache = new Map();
     }
 
     async load(metaUrl, onProgress) {
@@ -366,11 +380,23 @@
       let bytes = 0;
       let scanned = 0;
       const byId = new Map(this.meta.shards.map((s) => [s.id, s]));
-      for (const [shardId] of picked) {
+      const texts = await poolMap(picked, 6, async ([shardId]) => {
         const sh = byId.get(shardId);
-        if (!sh) continue;
+        if (!sh) return null;
+        const url = new URL(sh.url, this.metaUrl).href;
+        if (!this.dataCache.has(url)) {
+          this.dataCache.set(url, await fetchText(url));
+          if (this.dataCache.size > 128) {
+            const k = this.dataCache.keys().next().value;
+            this.dataCache.delete(k);
+          }
+        }
+        return { sh, text: this.dataCache.get(url) };
+      });
+      for (const item of texts) {
+        if (!item) continue;
+        const { sh, text } = item;
         if (bytes + sh.bytes > budgetBytes && results.length) break;
-        const text = await fetchText(new URL(sh.url, this.metaUrl).href);
         bytes += sh.bytes;
         scanned++;
         for (const line of text.split("\n")) {
