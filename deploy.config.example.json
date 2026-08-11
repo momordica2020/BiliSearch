@@ -1,0 +1,9 @@
+{
+  "buildArgs": ["--mode", "routing", "--groups", "4", "--shard-bases", "deploy.config.json"],
+  "bases": [
+    { "group": 0, "url": "", "branch": "" },
+    { "group": 1, "url": "https://cdn.jsdelivr.net/gh/momordica2020/BiliSearch@data1", "branch": "data1" },
+    { "group": 2, "url": "https://cdn.jsdelivr.net/gh/momordica2020/BiliSearch@data2", "branch": "data2" },
+    { "group": 3, "url": "https://cdn.jsdelivr.net/gh/momordica2020/BiliSearch@data3", "branch": "data3" }
+  ]
+}

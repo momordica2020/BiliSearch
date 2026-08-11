@@ -17,6 +17,9 @@ import argparse
 import gzip
 import hashlib
 import json
+import math
+import re
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -66,6 +69,18 @@ def compact(rec):
     return out
 
 
+def py_tokenize(text):
+    """与 site/search.js 的 tokenize 保持一致的词元化（bigram + 拉丁词）。"""
+    s = str(text or "").lower()
+    tokens = re.findall(r"[a-z0-9][a-z0-9._#+\-]*", s)
+    cjk = [ch for ch in s if "\u3400" <= ch <= "\u9fff"]
+    for i in range(len(cjk) - 1):
+        tokens.append(cjk[i] + cjk[i + 1])
+    if len(cjk) == 1:
+        tokens.append(cjk[0])
+    return tokens
+
+
 args_desc_len = 180  # 会被 main 覆盖
 
 
@@ -111,15 +126,135 @@ def write_shards(records, out_dir: Path, shard_size: int, shard_count: int):
     return shards
 
 
+def build_routing(records, out_dir: Path, args):
+    """路由模式：数据分片 + 词->分片目录（两级静态搜索，客户端按需下载）。"""
+    shard_dir = out_dir / "shards"
+    dir_dir = out_dir / "dir"
+    for d in (shard_dir, dir_dir):
+        if d.exists():
+            for old in d.glob("**/*.gz"):
+                old.unlink()
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    dir_dir.mkdir(parents=True, exist_ok=True)
+
+    total = len(records)
+    shard_count = args.shard_count
+    if shard_count <= 0:
+        recs_per = max(1, args.recs_per_shard)
+        shard_count = 2 ** math.ceil(math.log2(max(64, total / recs_per)))
+        shard_count = min(8192, shard_count)
+    groups = max(1, args.groups)
+
+    buckets = [[] for _ in range(shard_count)]
+    for r in records:
+        key = f"{r.get('type')}:{r.get('id')}".encode("utf-8")
+        buckets[int(hashlib.md5(key).hexdigest(), 16) % shard_count].append(r)
+
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE post (token TEXT, shard INT, cnt INT, PRIMARY KEY(token, shard))")
+
+    shards = []
+    for i, chunk in enumerate(buckets):
+        if not chunk:
+            continue
+        lines = "\n".join(
+            json.dumps(compact(r), ensure_ascii=False, separators=(",", ":"))
+            for r in chunk
+        )
+        data = gzip.compress((lines + "\n").encode("utf-8"), compresslevel=9)
+        group = i % groups
+        (shard_dir / f"g{group}").mkdir(exist_ok=True)
+        digest = hashlib.md5(data).hexdigest()[:8]
+        name = f"g{group}/{i:04d}-{digest}.gz"
+        (shard_dir / name).write_bytes(data)
+        shards.append({"id": i, "group": group, "url": "shards/" + name,
+                       "n": len(chunk), "bytes": len(data)})
+        counts = {}
+        for r in chunk:
+            for field in (r.get("title"), r.get("author"), r.get("category"), r.get("desc")):
+                seen = set()
+                for tok in py_tokenize(field):
+                    if tok in seen:
+                        continue
+                    seen.add(tok)
+                    counts[tok] = counts.get(tok, 0) + 1
+        db.executemany("INSERT OR REPLACE INTO post VALUES (?,?,?)",
+                       [(t, i, c) for t, c in counts.items()])
+    db.commit()
+
+    # 导出目录：按词排序、切成若干 dir 分片（词-> "cnt:shard,..." 按 cnt 降序）
+    dir_shards = []
+    buf, buf_size, cur_min, cur_max, cur_token, pairs = [], 0, None, None, None, []
+    idx = 0
+
+    def flush_dir():
+        nonlocal buf, buf_size, cur_min, cur_max, idx
+        if not buf:
+            return
+        text = "\n".join(buf) + "\n"
+        data = gzip.compress(text.encode("utf-8"), compresslevel=9)
+        digest = hashlib.md5(data).hexdigest()[:8]
+        name = f"{idx:03d}-{digest}.gz"
+        (dir_dir / name).write_bytes(data)
+        dir_shards.append({"id": idx, "url": "dir/" + name, "min": cur_min,
+                           "max": cur_max, "n": len(buf), "bytes": len(data)})
+        idx += 1
+        buf, buf_size, cur_min, cur_max = [], 0, None, None
+
+    for token, shard, cnt in db.execute(
+            "SELECT token, shard, cnt FROM post ORDER BY token, cnt DESC, shard"):
+        if token != cur_token:
+            if cur_token is not None:
+                line = f"{cur_token}\t{','.join(pairs)}"
+                buf.append(line)
+                buf_size += len(line) + 1
+                if buf_size >= args.dir_target:
+                    flush_dir()
+            cur_token, pairs = token, []
+            if cur_min is None:
+                cur_min = token
+            cur_max = token
+        pairs.append(f"{cnt}:{shard}")
+    if cur_token is not None:
+        line = f"{cur_token}\t{','.join(pairs)}"
+        buf.append(line)
+        buf_size += len(line) + 1
+    flush_dir()
+
+    # 多仓库：按 group 把分片 URL 换成外部 base（jsdelivr/raw 等）
+    if args.shard_bases:
+        cfg = json.loads(Path(args.shard_bases).read_text("utf-8"))
+        bases = {int(b["group"]): b["url"] for b in cfg.get("bases", [])}
+        for sh in shards:
+            base = bases.get(sh["group"])
+            if base:
+                sh["url"] = base.rstrip("/") + "/" + sh["url"]
+    return shards, dir_shards, shard_count, groups
+
+
 def main():
     global args_desc_len
     parser = argparse.ArgumentParser(description="构建 BiliSearch 离线索引")
     parser.add_argument("--raw", default="data/raw", help="原始 JSONL 目录")
     parser.add_argument("--out", default="site/data", help="输出目录")
+    parser.add_argument("--mode", choices=["auto", "compact", "routing"], default="auto",
+                        help="auto=超 15 万条自动用路由模式；compact=旧内存模式；routing=两级静态搜索")
     parser.add_argument("--shard-size", type=int, default=3000,
                         help="每个分片多少条记录（默认 3000）")
-    parser.add_argument("--shard-count", type=int, default=16,
-                        help="稳定分桶数（默认 16；设 0 则用 --shard-size 有序分片）")
+    parser.add_argument("--shard-count", type=int, default=0,
+                        help="0=自动（compact 用 16 桶稳定分片，routing 按 --recs-per-shard 定）；显式指定则固定")
+    parser.add_argument("--recs-per-shard", type=int, default=1500,
+                        help="routing 模式：每个数据分片目标条数（自动定分片数）")
+    parser.add_argument("--groups", type=int, default=1,
+                        help="routing 模式：分片分组数（用于多仓库/分支托管）")
+    parser.add_argument("--dir-target", type=int, default=1500000,
+                        help="routing 模式：每个目录分片未压缩字节预算")
+    parser.add_argument("--search-budget", type=int, default=24000000,
+                        help="routing 模式：单次查询最多下载多少字节数据分片")
+    parser.add_argument("--search-max-shards", type=int, default=64,
+                        help="routing 模式：单次查询最多下载多少个数据分片")
+    parser.add_argument("--shard-bases", default="",
+                        help="routing 模式：多仓库配置 JSON（bases: [{group, url}]）")
     parser.add_argument("--desc-len", type=int, default=180,
                         help="描述截断长度，控制索引体积")
     args = parser.parse_args()
@@ -128,7 +263,6 @@ def main():
     raw_dir = Path(args.raw)
     out_dir = Path(args.out)
     records = load_records(raw_dir)
-    shards = write_shards(records, out_dir, args.shard_size, args.shard_count)
 
     counts = {}
     for r in records:
@@ -142,24 +276,49 @@ def main():
         except Exception:
             pass
 
-    meta = {
-        "v": 2,
-        "types": TYPE_CODE,
-        "built": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "updated": last_run,
-        "total": len(records),
-        "counts": counts,
-        "typeNames": TYPE_NAMES,
-        "shards": shards,
-        "note": "shards[].url 可指向其他分支/仓库，实现多仓分片扩容",
-    }
+    mode = args.mode
+    if mode == "auto":
+        mode = "routing" if len(records) > 150000 else "compact"
+    built = time.strftime("%Y-%m-%d %H:%M:%S")
+    if mode == "routing":
+        shards, dir_shards, shard_count, groups = build_routing(records, out_dir, args)
+        meta = {
+            "v": 3,
+            "type": "routing",
+            "built": built,
+            "updated": last_run,
+            "total": len(records),
+            "counts": counts,
+            "typeNames": TYPE_NAMES,
+            "groups": groups,
+            "shardCount": shard_count,
+            "shards": shards,
+            "dirShards": dir_shards,
+            "search": {"budgetBytes": args.search_budget,
+                       "maxShards": args.search_max_shards},
+            "note": "路由模式：查询时按目录只下载相关分片，不加载全量",
+        }
+    else:
+        shards = write_shards(records, out_dir, args.shard_size, args.shard_count or 16)
+        meta = {
+            "v": 2,
+            "types": TYPE_CODE,
+            "built": built,
+            "updated": last_run,
+            "total": len(records),
+            "counts": counts,
+            "typeNames": TYPE_NAMES,
+            "shards": shards,
+            "note": "shards[].url 可指向其他分支/仓库，实现多仓分片扩容",
+        }
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "meta.json").write_text(
         json.dumps(meta, ensure_ascii=False, separators=(",", ":")), "utf-8"
     )
 
-    print(f"索引完成：{len(records)} 条 -> {len(shards)} 个分片，共 "
-          f"{sum(s['bytes'] for s in shards) / 1024:.0f} KB（gzip）")
+    print(f"索引完成：{len(records)} 条 -> {len(shards)} 个数据分片"
+          + (f" + {len(dir_shards)} 个目录分片" if mode == "routing" else "")
+          + f"，共 {sum(s['bytes'] for s in shards) / 1024:.0f} KB（gzip）")
     print("各类型数量:", {TYPE_NAMES.get(k, k): v for k, v in counts.items()})
 
 

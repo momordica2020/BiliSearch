@@ -25,8 +25,27 @@ if (-not $wt.StartsWith($root + $sep)) {
 }
 
 Write-Host "==> 构建索引"
-& python build_index.py
+$cfgPath = Join-Path $root "deploy.config.json"
+if (Test-Path $cfgPath) {
+    $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+    Write-Host "==> 使用 deploy.config.json 构建参数"
+    & python build_index.py $cfg.buildArgs
+} else {
+    & python build_index.py
+}
 if ($LASTEXITCODE -ne 0) { throw "build_index.py 失败" }
+
+if (Test-Path $cfgPath) {
+    Write-Host "==> 发布外部托管的分片组"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts\publish_shards.ps1") -Remote $Remote
+    foreach ($b in $cfg.bases) {
+        if (-not $b.url) { continue }
+        $gdir = Join-Path $root "site\data\shards\g$($b.group)"
+        if (Test-Path $gdir) {
+            Remove-Item -LiteralPath $gdir -Recurse -Force
+        }
+    }
+}
 
 Write-Host "==> 准备 gh-pages 工作树: $wt"
 if (-not (Test-Path (Join-Path $wt ".git"))) {

@@ -2,7 +2,8 @@
   "use strict";
 
   const TYPE_LABEL = { video: "视频", user: "UP主", dynamic: "动态", article: "专栏" };
-  const engine = new BiliSearch.BiliSearchEngine();
+  let engine = null;
+  let routing = false;
 
   const els = {
     input: document.getElementById("q"),
@@ -78,13 +79,24 @@
     setLoading("正在下载索引…");
     try {
       const metaUrl = new URL("data/meta.json", location.href).href;
-      const meta = await engine.load(metaUrl, (done, total) => {
-        setLoading("正在下载索引 " + done + "/" + total + " 分片…");
-      });
+      const meta = JSON.parse(await BiliSearch.fetchText(metaUrl));
+      routing = meta.type === "routing";
+      engine = routing
+        ? new BiliSearch.BiliSearchRouting()
+        : new BiliSearch.BiliSearchEngine();
+      if (routing) {
+        engine.metaUrl = metaUrl;
+        engine.meta = meta;
+      } else {
+        await engine.load(metaUrl, (done, total) => {
+          setLoading("正在下载索引 " + done + "/" + total + " 分片…");
+        });
+      }
       ready = true;
       setStats(meta);
       updateNet();
-      setLoading("索引就绪 · " + new Date().toLocaleTimeString("zh-CN", { hour12: false }));
+      const mode = routing ? "路由搜索模式" : "内存索引模式";
+      setLoading(mode + " · " + new Date().toLocaleTimeString("zh-CN", { hour12: false }));
       if (state.q) runSearch();
       else showEmpty("输入关键词开始搜索，例如：某个视频标题、UP 主昵称、专栏关键词。");
     } catch (e) {
@@ -110,17 +122,21 @@
   function runSearch() {
     if (!ready) return;
     const types = state.type === "all" ? null : [state.type];
-    let { total, items } = engine.search(state.q, {
-      types,
-      limit: state.page * state.pageSize,
-    });
+    const res = engine.search(state.q, { types, limit: state.page * state.pageSize });
+    const total = res.total;
+    let items = res.items;
     if (state.sort === "date") {
       items = items.slice().sort((a, b) => (b.p || 0) - (a.p || 0));
-      total = items.length;
     }
     state.rows = items;
     render(items);
     els.more.style.display = total > items.length ? "block" : "none";
+    if (routing) {
+      const cov = res.partial
+        ? `已检索 ${res.scanned}/${res.candidates} 个分片（结果可能不完整）`
+        : `已检索 ${res.scanned}/${res.candidates} 个分片`;
+      setLoading("搜索完成 · " + cov + (res.bytes ? " · " + (res.bytes / 1048576).toFixed(1) + "MB" : ""));
+    }
   }
 
   function render(rows) {
