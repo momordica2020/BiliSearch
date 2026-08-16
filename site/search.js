@@ -187,18 +187,24 @@
     }
 
     search(query, opts = {}) {
-      const q = String(query || "").trim().toLowerCase();
-      if (!q) return { total: 0, items: [] };
+      const pq = parseQuery(query);
+      if (!pq.hasContent) return { total: 0, items: [] };
       const fuzzy = opts.fuzzy == null ? 1 : opts.fuzzy;
       const limit = opts.limit || 50;
       const offset = opts.offset || 0;
-      const qTokens = tokenize(q);
+      const qTokens = candidateTokens(pq);
+      if (!qTokens.length) return { total: 0, items: [], note: "纯排除/过滤查询暂不支持" };
       const scores = new Map();
       const wantTypes = Array.isArray(opts.types) && opts.types.length
         ? new Set(opts.types.map((t) => TYPES.indexOf(t)))
         : null;
 
-      const allowed = (docT) => !wantTypes || wantTypes.has(docT);
+      const allowed = (docT) => {
+        const name = typeName(docT);
+        if (pq.type && name !== pq.type) return false;
+        if (pq.typeExclude && name === pq.typeExclude) return false;
+        return !wantTypes || wantTypes.has(docT);
+      };
 
       for (const tok of qTokens) {
         if (tok.length === 1 && CJK.test(tok)) {
@@ -235,7 +241,9 @@
 
       const rows = [];
       for (const [di, s] of scores) {
-        rows.push({ doc: this.docs[di], score: s });
+        const doc = this.docs[di];
+        if (matchDoc(doc, pq) <= 0) continue;
+        rows.push({ doc, score: s });
       }
       rows.sort((a, b) => b.score - a.score || (b.doc.p || 0) - (a.doc.p || 0));
       const total = rows.length;
@@ -265,6 +273,81 @@
       }
     }
     return s;
+  }
+
+  const TYPE_ALIAS = {
+    video: "video", 视频: "video", 用户: "user", "up主": "user", up主: "user",
+    dynamic: "dynamic", 动态: "dynamic", article: "article", 专栏: "article", 文章: "article",
+  };
+
+  function parseQuery(q) {
+    /* 查询语法：
+       "精确短语"     强制精确包含（任意字段，大小写不敏感）
+       -"短语"        排除包含该短语的记录
+       -词           排除包含该词的记录
+       up:名称       只看该作者（author 同理）
+       -up:名称      排除该作者
+       type:视频      限定类型（video/user/dynamic/article 或中文别名） */
+    const out = {
+      includes: [], excludes: [], exacts: [], exactExcludes: [],
+      up: "", upExclude: "", type: "", typeExclude: "",
+    };
+    const s = String(q || "");
+    const rest = s.replace(/(-?)"([^"]*)"/g, (m, neg, phrase) => {
+      phrase = phrase.trim();
+      if (phrase) {
+        if (neg) out.exactExcludes.push(phrase);
+        else out.exacts.push(phrase);
+      }
+      return " ";
+    });
+    for (const word of rest.split(/\s+/)) {
+      if (!word) continue;
+      const low = word.toLowerCase();
+      const val = (w) => w.slice(w.indexOf(":") + 1);
+      if (low.startsWith("-up:") || low.startsWith("-author:")) out.upExclude = val(word);
+      else if (low.startsWith("up:") || low.startsWith("author:")) out.up = val(word);
+      else if (low.startsWith("-type:")) out.typeExclude = TYPE_ALIAS[val(word).toLowerCase()] || val(word);
+      else if (low.startsWith("type:")) out.type = TYPE_ALIAS[val(word).toLowerCase()] || val(word);
+      else if (word.startsWith("-") && word.length > 1) out.excludes.push(word.slice(1));
+      else out.includes.push(word);
+    }
+    out.hasContent = out.includes.length || out.excludes.length || out.exacts.length
+      || out.exactExcludes.length || out.up || out.upExclude || out.type || out.typeExclude;
+    return out;
+  }
+
+  function anyField(d, phrase) {
+    const low = phrase.toLowerCase();
+    return ((d.s || "") + "\u0001" + (d.a || "") + "\u0001" + (d.c || "") + "\u0001" + (d.d || ""))
+      .toLowerCase().includes(low);
+  }
+
+  function matchDoc(d, pq) {
+    if (pq.up && !(d.a || "").toLowerCase().includes(pq.up.toLowerCase())) return 0;
+    if (pq.upExclude && (d.a || "").toLowerCase().includes(pq.upExclude.toLowerCase())) return 0;
+    if (pq.type && typeName(d.t) !== pq.type) return 0;
+    if (pq.typeExclude && typeName(d.t) === pq.typeExclude) return 0;
+    for (const ex of pq.excludes) if (anyField(d, ex)) return 0;
+    for (const ex of pq.exactExcludes) if (anyField(d, ex)) return 0;
+    let s = 0;
+    for (const ph of pq.exacts) {
+      if (!anyField(d, ph)) return 0;
+      s += 2;
+    }
+    const tokens = new Set();
+    for (const inc of pq.includes) for (const t of tokenize(inc)) tokens.add(t);
+    s += scoreDoc(d, tokens);
+    if (!pq.includes.length && !pq.exacts.length && !tokens.size) s = 1;
+    return s > 0 ? s : 0;
+  }
+
+  function candidateTokens(pq) {
+    const set = new Set();
+    for (const t of pq.includes) for (const tok of tokenize(t)) set.add(tok);
+    for (const ph of pq.exacts) for (const tok of tokenize(ph)) set.add(tok);
+    if (!set.size && pq.up) for (const tok of tokenize(pq.up)) set.add(tok);
+    return [...set];
   }
 
   class BiliSearchRouting {
@@ -349,18 +432,30 @@
     }
 
     async search(query, opts = {}) {
-      const q = String(query || "").trim();
-      if (!q) return { total: 0, items: [], partial: false, scanned: 0, candidates: 0, bytes: 0 };
-      const qTokens = [...new Set(tokenize(q))];
-      const wantTypes = Array.isArray(opts.types) && opts.types.length
+      const pq = parseQuery(query);
+      if (!pq.hasContent) {
+        return { total: 0, items: [], partial: false, scanned: 0, candidates: 0, bytes: 0 };
+      }
+      const qTokens = candidateTokens(pq);
+      const uiTypes = Array.isArray(opts.types) && opts.types.length
         ? new Set(opts.types.map((t) => TYPES.indexOf(t))) : null;
+      const allowedType = (t) => {
+        const name = typeName(t);
+        if (pq.type && name !== pq.type) return false;
+        if (pq.typeExclude && name === pq.typeExclude) return false;
+        if (uiTypes && !uiTypes.has(t)) return false;
+        return true;
+      };
       const budgetBytes = opts.budgetBytes || this.meta.search.budgetBytes || 24000000;
       const maxShards = opts.maxShards || this.meta.search.maxShards || 64;
       const limit = opts.limit || 50;
 
+      if (!qTokens.length) {
+        return { total: 0, items: [], partial: true, scanned: 0, candidates: 0, bytes: 0,
+                 note: "纯排除/过滤查询暂不支持，请至少包含一个可检索词" };
+      }
       const maps = [];
       for (const tok of qTokens) maps.push(await this._collect(tok));
-      if (!maps.length) return { total: 0, items: [], partial: false, scanned: 0, candidates: 0, bytes: 0 };
 
       let primary = 0;
       maps.forEach((m, i) => { if (m.size < maps[primary].size) primary = i; });
@@ -374,13 +469,12 @@
         .map((shard) => [shard, maps.reduce((w, m) => w + (m.get(shard) || 0), 0)])
         .sort((a, b) => b[1] - a[1]);
 
-      const tokens = new Set(qTokens);
       const picked = candArr.slice(0, maxShards);
       const results = [];
       let bytes = 0;
       let scanned = 0;
       const byId = new Map(this.meta.shards.map((s) => [s.id, s]));
-      const texts = await poolMap(picked, 6, async ([shardId]) => {
+      const fetchOne = async ([shardId]) => {
         const sh = byId.get(shardId);
         if (!sh) return null;
         const url = new URL(sh.url, this.metaUrl).href;
@@ -392,22 +486,30 @@
           }
         }
         return { sh, text: this.dataCache.get(url) };
-      });
-      for (const item of texts) {
-        if (!item) continue;
-        const { sh, text } = item;
-        if (bytes + sh.bytes > budgetBytes && results.length) break;
-        bytes += sh.bytes;
-        scanned++;
-        for (const line of text.split("\n")) {
-          const t = line.trim();
-          if (!t) continue;
-          let d;
-          try { d = JSON.parse(t); } catch { continue; }
-          if (wantTypes && !wantTypes.has(d.t)) continue;
-          const sc = scoreDoc(d, tokens);
-          if (sc > 0) results.push({ d, sc });
+      };
+      const BATCH = 6;
+      for (let i = 0; i < picked.length; i += BATCH) {
+        const batch = picked.slice(i, i + BATCH);
+        const texts = await poolMap(batch, BATCH, fetchOne);
+        for (const item of texts) {
+          if (!item) continue;
+          if (bytes + item.sh.bytes > budgetBytes && results.length) break;
+          bytes += item.sh.bytes;
+          scanned++;
+          for (const line of item.text.split("\n")) {
+            const t = line.trim();
+            if (!t) continue;
+            let d;
+            try { d = JSON.parse(t); } catch { continue; }
+            if (!allowedType(d.t)) continue;
+            const sc = matchDoc(d, pq);
+            if (sc > 0) results.push({ d, sc });
+          }
         }
+        if (opts.onProgress) {
+          opts.onProgress(Math.min(i + BATCH, picked.length), picked.length, bytes);
+        }
+        if (bytes > budgetBytes && results.length) break;
       }
       results.sort((a, b) => b.sc - a.sc || (b.d.p || 0) - (a.d.p || 0));
       const items = results.slice(0, limit).map((r) => ({
@@ -425,5 +527,5 @@
     }
   }
 
-  return { BiliSearchEngine, BiliSearchRouting, tokenize, levenshtein, fetchText, typeName, urlOf };
+  return { BiliSearchEngine, BiliSearchRouting, tokenize, levenshtein, fetchText, typeName, urlOf, parseQuery, matchDoc };
 });

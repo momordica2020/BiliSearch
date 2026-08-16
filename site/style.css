@@ -38,6 +38,7 @@ main { max-width: 760px; margin: 0 auto; padding: 18px 16px 60px; }
   outline: none; transition: border-color .15s;
 }
 .searchbox input:focus { border-color: var(--accent); }
+.hint { color: var(--muted); font-size: 12px; margin: 6px 2px 0; }
 
 .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; align-items: center; }
 .tab {
@@ -54,6 +55,7 @@ main { max-width: 760px; margin: 0 auto; padding: 18px 16px 60px; }
 
 .stats, .status { color: var(--muted); font-size: 12.5px; margin: 8px 2px 2px; }
 .progress { height: 3px; background: var(--line); border-radius: 2px; margin: 8px 0 2px; overflow: hidden; display: none; }
+#progressbar { height: 3px; width: 0; background: var(--accent); border-radius: 2px; transition: width .25s ease; }
 .progressbar-anim { display: block; height: 3px; width: 30%; background: var(--accent); border-radius: 2px; animation: slide 1.2s infinite; }
 @keyframes slide { from { transform: translateX(-100%);} to { transform: translateX(400%);} }
 
@@ -92,4 +94,3 @@ footer {
   padding: 18px 14px 30px; border-top: 1px solid var(--line);
 }
 footer a { color: var(--accent); text-decoration: none; }
-

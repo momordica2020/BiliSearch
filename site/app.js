@@ -11,6 +11,7 @@
     sort: document.getElementById("sort"),
     status: document.getElementById("status"),
     progress: document.getElementById("progress"),
+    progressbar: document.getElementById("progressbar"),
     stats: document.getElementById("stats"),
     results: document.getElementById("results"),
     more: document.getElementById("more"),
@@ -64,6 +65,7 @@
     state.q = p.get("q") || "";
     state.type = p.get("t") || "all";
     state.sort = p.get("s") || "relevance";
+    if (state.sort === "date") state.sort = "date_desc";  // 旧链接兼容
     els.tabs.forEach((t) => t.classList.toggle("active", t.dataset.type === state.type));
     els.sort.value = state.sort;
   }
@@ -126,16 +128,34 @@
     const seq = ++searchSeq;
     let res;
     try {
-      res = await engine.search(state.q, { types, limit: state.page * state.pageSize });
+      showProgress(2, "正在检索…");
+      res = await engine.search(state.q, {
+        types,
+        limit: state.page * state.pageSize,
+        onProgress: (done, total, bytes) => {
+          const pct = total ? Math.round((done / total) * 100) : 0;
+          showProgress(pct, "正在下载分片 " + done + "/" + total +
+            (bytes ? " · " + (bytes / 1048576).toFixed(1) + "MB" : "") + "…");
+        },
+      });
+      hideProgress();
     } catch (e) {
+      hideProgress();
       setLoading("搜索失败：" + e.message);
       return;
     }
     if (seq !== searchSeq) return;  // 丢弃过期结果
     const total = res.total;
     let items = res.items;
-    if (state.sort === "date") {
-      items = items.slice().sort((a, b) => (b.p || 0) - (a.p || 0));
+    items = items.slice();
+    if (state.sort === "date_desc") {
+      items.sort((a, b) => (b.p || 0) - (a.p || 0));
+    } else if (state.sort === "date_asc") {
+      items.sort((a, b) => (a.p || 0) - (b.p || 0));
+    } else if (state.sort === "len_desc") {
+      items.sort((a, b) => (b.s || "").length - (a.s || "").length);
+    } else if (state.sort === "len_asc") {
+      items.sort((a, b) => (a.s || "").length - (b.s || "").length);
     }
     state.rows = items;
     render(items);
@@ -179,6 +199,17 @@
 
   function setLoading(text) {
     els.status.textContent = text;
+  }
+
+  function showProgress(pct, text) {
+    els.progress.style.display = "block";
+    els.progressbar.style.width = Math.max(2, Math.min(100, pct)) + "%";
+    setLoading(text);
+  }
+
+  function hideProgress() {
+    els.progress.style.display = "none";
+    els.progressbar.style.width = "0%";
   }
 
   function updateNet() {

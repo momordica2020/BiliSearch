@@ -18,6 +18,7 @@
   <main>
     <div class="searchbox">
       <input id="q" type="search" placeholder="模糊搜索：标题、UP 主、专栏关键词…" autocomplete="off" autofocus>
+      <div class="hint">支持：&quot;精确短语&quot; · -排除词 · up:UP主 · -up:排除 · type:视频/动态/专栏</div>
     </div>
 
     <div class="tabs" id="tabs">
@@ -28,7 +29,10 @@
       <button class="tab" data-type="article">专栏</button>
       <select id="sort" aria-label="排序">
         <option value="relevance">相关度</option>
-        <option value="date">最新</option>
+        <option value="date_desc">最新</option>
+        <option value="date_asc">最旧</option>
+        <option value="len_desc">标题长→短</option>
+        <option value="len_asc">标题短→长</option>
       </select>
     </div>
 
@@ -51,4 +55,3 @@
   <script src="app.js"></script>
 </body>
 </html>
-
