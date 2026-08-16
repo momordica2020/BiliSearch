@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="BiliSearch：B 站视频/UP主/动态/专栏的离线模糊搜索引擎，静态托管、本地建索引、不存内容只存链接。">
+  <meta name="theme-color" content="#0f1115">
+  <title>BiliSearch · B 站离线索引</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2300aeec'/%3E%3Cpath d='M10 12l-3 0 0 12 18 0 0-12-3 0 0-4-2 0 0 4-8 0 0-4-2 0z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1><span class="logo">B</span>iliSearch</h1>
+    <p class="sub">B 站元数据离线索引 · 视频 / UP主 / 动态 / 专栏 · 只存链接，不存内容</p>
+  </header>
+
+  <main>
+    <div class="searchbox">
+      <input id="q" type="search" placeholder="模糊搜索：标题、UP 主、av/BV 号、专栏关键词…" autocomplete="off" autofocus>
+      <div class="hint">支持：&quot;精确短语&quot; · -排除词 · up:UP主 · -up:排除 · type:视频/动态/专栏</div>
+    </div>
+
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-type="all">全部</button>
+      <button class="tab" data-type="video">视频</button>
+      <button class="tab" data-type="user">UP主</button>
+      <button class="tab" data-type="dynamic">动态</button>
+      <button class="tab" data-type="article">专栏</button>
+      <select id="sort" aria-label="排序">
+        <option value="relevance">相关度</option>
+        <option value="date_desc">最新</option>
+        <option value="date_asc">最旧</option>
+        <option value="len_desc">标题长→短</option>
+        <option value="len_asc">标题短→长</option>
+      </select>
+    </div>
+
+    <div id="stats" class="stats"></div>
+    <div id="status" class="status"></div>
+    <div id="progress" class="progress"><div id="progressbar"></div></div>
+
+    <div id="results" class="results"></div>
+    <div id="empty" class="empty"></div>
+    <button id="more" class="more" hidden>加载更多</button>
+  </main>
+
+  <footer>
+    数据由本地定时任务抓取构建 · 结果仅索引元数据与跳转链接 ·
+    <a href="https://github.com/" rel="noopener" target="_blank">源码</a>
+  </footer>
+
+  <noscript><p class="empty">此站点需要启用 JavaScript 才能进行本地搜索。</p></noscript>
+  <script src="search.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
