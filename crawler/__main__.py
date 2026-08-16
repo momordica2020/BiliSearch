@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from .crawl import acquire_lock, add_args, run_burst, run_continuous, run_crawl, run_roam
+from .crawl import acquire_lock, add_args, run_avscan, run_burst, run_continuous, run_crawl, run_roam
 
 
 def build(args):
@@ -67,6 +67,8 @@ def main():
             return rc
         if args.mode == "continuous":
             return run_continuous(args)
+        if args.mode == "avscan":
+            return run_avscan(args)
         if args.mode == "scheduler":
             scheduler_loop(args)
             return 0

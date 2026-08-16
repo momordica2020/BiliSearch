@@ -126,6 +126,7 @@
       const fields = [
         [doc.s, 2.0, this.titleIdx],   // 标题（另建 title 索引用于加权）
         [doc.a, 1.5, null],
+        [doc.i, 1.5, null],
         [doc.c, 1.2, null],
         [doc.d, 1.0, null],
       ];
@@ -257,7 +258,7 @@
 
   function scoreDoc(d, tokens) {
     let s = 0;
-    const fields = [[d.s, 2], [d.a, 1.5], [d.c, 1.2], [d.d, 1]];
+    const fields = [[d.s, 2], [d.a, 1.5], [d.i, 1.5], [d.c, 1.2], [d.d, 1]];
     for (const [text, w] of fields) {
       const seen = new Set();
       for (const t of tokenize(text)) {
@@ -319,7 +320,8 @@
 
   function anyField(d, phrase) {
     const low = phrase.toLowerCase();
-    return ((d.s || "") + "\u0001" + (d.a || "") + "\u0001" + (d.c || "") + "\u0001" + (d.d || ""))
+    return ((d.s || "") + "\u0001" + (d.a || "") + "\u0001" + (d.i || "") + "\u0001"
+            + (d.c || "") + "\u0001" + (d.d || ""))
       .toLowerCase().includes(low);
   }
 
@@ -401,7 +403,10 @@
 
     async _collect(tok) {
       const isSingleCjk = tok.length === 1 && CJK.test(tok);
-      const expandPrefix = isSingleCjk || (/[a-z0-9]/.test(tok) && tok.length >= 3);
+      // av2 / bv1xx 这类"字母+数字"ID 型词只做精确匹配，不做前缀展开（否则会把海量 av 号候选全拉进来）
+      const isIdLike = /^[a-z]+\d/.test(tok);
+      const expandPrefix = isSingleCjk
+        || (!isIdLike && /[a-z0-9]/.test(tok) && tok.length >= 4);
       const dirs = isSingleCjk
         ? this._dirShardsForRange(tok, tok + "\uffff")
         : expandPrefix

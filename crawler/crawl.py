@@ -595,6 +595,117 @@ def run_burst(args):
     return 0
 
 
+def run_avscan(args):
+    """按旧 av 号顺序扫描：从 av1 开始逐个请求 view?aid=，索引现存稿件。
+    游标保存在 state.json 的 avscan.next，中断后重跑自动续传。"""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    data_dir = Path(args.data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir = data_dir / "raw"
+    raw_dir.mkdir(exist_ok=True)
+    state_path = data_dir / "state.json"
+    state = {}
+    if state_path.exists():
+        state = json.loads(state_path.read_text("utf-8"))
+    if args.cookie and not state.get("cookie_extra"):
+        state["cookie_extra"] = args.cookie
+    if args.cookies_file and Path(args.cookies_file).exists() and not state.get("cookie_extra"):
+        state["cookie_extra"] = Path(args.cookies_file).read_text("utf-8").strip()
+
+    client = BiliClient(state, interval=args.interval)
+    client._ensure_cookies()
+    client._ensure_wbi()
+
+    seen_state = state.setdefault("seen", {})
+    scan = state.setdefault("avscan", {})
+    start = args.aid_from if args.aid_from is not None else int(scan.get("next") or 1)
+    if start < 1:
+        start = 1
+    aid_to = args.aid_to or 1000000
+    if start > aid_to:
+        print(f"[avscan] 已扫描到 av{start}，超出上限 av{aid_to}")
+        return 0
+
+    lock = threading.Lock()
+    stop_event = threading.Event()
+    install_sigint(stop_event)
+    out_files = {}
+    for typ, fname in RAW_FILES.items():
+        out_files[typ] = (raw_dir / fname).open("a", encoding="utf-8")
+    derived_users = set()
+    cursor = {"next": start}
+    stats = {"ok": 0, "dead": 0}
+    args.related = 0  # 顺序扫描只取视频本身
+    reporter = ProgressReporter(stop_event, lock, stats,
+                                total=(aid_to - start + 1) if aid_to else None,
+                                label="avscan")
+    reporter.start()
+
+    def worker():
+        c = BiliClient(state, interval=args.interval)
+        while not stop_event.is_set():
+            with lock:
+                if stop_requested(args.stop_file):
+                    stop_event.set()
+                    break
+                aid = cursor["next"]
+                if aid > aid_to:
+                    break
+                cursor["next"] = aid + 1
+            key = f"video:av{aid}"
+            try:
+                rec, _ = fetch_item(c, "video", f"av{aid}", args)
+            except BiliError as e:
+                msg = str(e)
+                with lock:
+                    stats["dead"] += 1
+                    if stats["dead"] % 500 == 1 and "-404" not in msg and "62002" not in msg:
+                        print(f"[warn] av{aid}: {msg}")
+                continue
+            if not rec:
+                with lock:
+                    stats["dead"] += 1
+                continue
+            with lock:
+                out_files["video"].write(json.dumps(rec, ensure_ascii=False) + "\n")
+                out_files["video"].flush()
+                seen_state[key] = int(time.time())
+                stats["ok"] += 1
+                urec = derive_user_rec(rec)
+                if urec and urec["id"] not in derived_users and urec["id"] not in seen_state:
+                    derived_users.add(urec["id"])
+                    out_files["user"].write(json.dumps(urec, ensure_ascii=False) + "\n")
+                    out_files["user"].flush()
+                if stats["ok"] % 200 == 0:
+                    scan["next"] = cursor["next"]
+                    _save_state(state, state_path)
+            if stats["ok"] % 200 == 1:
+                print(f"[avscan] 已到 av{aid}，存活 {stats['ok']}，失效 {stats['dead']}")
+
+    threads = [threading.Thread(target=worker, daemon=True)
+               for _ in range(max(1, args.workers))]
+    for t in threads:
+        t.start()
+    try:
+        for t in threads:
+            t.join()
+    except KeyboardInterrupt:
+        print("\n[已停止] 正在保存 avscan 游标…", file=sys.stderr)
+    finally:
+        stop_event.set()
+        reporter.join(timeout=1)
+        scan["next"] = cursor["next"]
+        _save_state(state, state_path)
+        for f in out_files.values():
+            f.close()
+    print(f"avscan 结束：已扫到 av{cursor['next'] - 1}，存活 {stats['ok']}，失效 {stats['dead']}；"
+          f"下次从 av{cursor['next']} 继续")
+    return 0
+
+
 class _JumpBag:
     """漫游模式的“随机跳转源”：跳出相关推荐的小圈子，覆盖全站。
 
@@ -969,9 +1080,9 @@ def run_crawl(args):
 
 
 def add_args(parser):
-    parser.add_argument("--mode", choices=["crawl", "scheduler", "burst", "roam", "continuous"],
+    parser.add_argument("--mode", choices=["crawl", "scheduler", "burst", "roam", "continuous", "avscan"],
                         default="crawl",
-                        help="crawl=图式爬取；burst=批量快抓；roam=全站漫游；continuous=24h 不间断；scheduler=常驻")
+                        help="crawl=图式爬取；burst=批量快抓；roam=全站漫游；avscan=按旧 av 号顺序扫描；continuous=24h；scheduler=常驻")
     parser.add_argument("--data-dir", default="data", help="数据目录（默认 data）")
     parser.add_argument("--seeds", default="seeds.txt", help="种子文件路径")
     parser.add_argument("--seed", action="append", default=[], help="追加单条种子，可多次")
@@ -1012,6 +1123,10 @@ def add_args(parser):
                         help="roam 模式：每步随机选几条相关视频继续游走")
     parser.add_argument("--author-expand", type=float, default=0.05,
                         help="roam 模式：抓到视频后扩展其作者的概率（收集专栏/动态）")
+    parser.add_argument("--aid-from", type=int, default=None,
+                        help="avscan 模式：起始 av 号（默认从 state 游标继续，首次为 1）")
+    parser.add_argument("--aid-to", type=int, default=None,
+                        help="avscan 模式：结束 av 号（默认 1000000）")
     parser.add_argument("--max-seconds", type=float, default=0,
                         help="roam 模式：单次最多跑多少秒（0=不限）")
     parser.add_argument("--sync-minutes", type=int, default=30,
@@ -1043,6 +1158,8 @@ def main():
             return run_roam(args)
         if args.mode == "continuous":
             return run_continuous(args)
+        if args.mode == "avscan":
+            return run_avscan(args)
         return run_crawl(args)
     finally:
         if lock:

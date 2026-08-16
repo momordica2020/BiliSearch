@@ -18,6 +18,7 @@ import gzip
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
 import sys
@@ -79,6 +80,45 @@ def py_tokenize(text):
     if len(cjk) == 1:
         tokens.append(cjk[0])
     return tokens
+
+
+def acquire_build_lock(lock_path):
+    """构建互斥锁：防止两个 build_index.py 并发（会互相清掉对方的分片文件）。"""
+    lock_path = Path(lock_path).resolve()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        f = lock_path.open("r+", encoding="utf-8")
+        created = False
+    except FileNotFoundError:
+        try:
+            f = lock_path.open("x", encoding="utf-8")
+            created = True
+        except FileExistsError:
+            f = lock_path.open("r+", encoding="utf-8")
+            created = False
+    try:
+        f.seek(0)
+        if created or not f.read(1):
+            f.write("0")
+            f.flush()
+        f.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            f.close()
+        except Exception:
+            pass
+        return None
+    f.seek(0)
+    f.write(str(os.getpid()))
+    f.truncate()
+    f.flush()
+    return f
 
 
 args_desc_len = 180  # 会被 main 覆盖
@@ -171,7 +211,7 @@ def build_routing(records, out_dir: Path, args):
                        "n": len(chunk), "bytes": len(data)})
         counts = {}
         for r in chunk:
-            for field in (r.get("title"), r.get("author"), r.get("category"), r.get("desc")):
+            for field in (r.get("title"), r.get("author"), r.get("category"), r.get("desc"), r.get("id")):
                 seen = set()
                 for tok in py_tokenize(field):
                     if tok in seen:
@@ -260,66 +300,79 @@ def main():
     args = parser.parse_args()
     args_desc_len = args.desc_len
 
+    lock = acquire_build_lock(Path(args.out) / ".build.lock")
+    if lock is None:
+        print(f"[lock] 另一个 build_index.py 正在运行（{args.out}/.build.lock 被占用），"
+              f"为避免互相覆盖已退出", file=sys.stderr)
+        return 1
+
     raw_dir = Path(args.raw)
     out_dir = Path(args.out)
-    records = load_records(raw_dir)
+    try:
+        records = load_records(raw_dir)
 
-    counts = {}
-    for r in records:
-        counts[r["type"]] = counts.get(r["type"], 0) + 1
+        counts = {}
+        for r in records:
+            counts[r["type"]] = counts.get(r["type"], 0) + 1
 
-    last_run = ""
-    state_path = raw_dir.parent / "state.json"
-    if state_path.exists():
-        try:
-            last_run = json.loads(state_path.read_text("utf-8")).get("last_run", "")
-        except Exception:
-            pass
+        last_run = ""
+        state_path = raw_dir.parent / "state.json"
+        if state_path.exists():
+            try:
+                last_run = json.loads(state_path.read_text("utf-8")).get("last_run", "")
+            except Exception:
+                pass
 
-    mode = args.mode
-    if mode == "auto":
-        mode = "routing" if len(records) > 150000 else "compact"
-    built = time.strftime("%Y-%m-%d %H:%M:%S")
-    if mode == "routing":
-        shards, dir_shards, shard_count, groups = build_routing(records, out_dir, args)
-        meta = {
-            "v": 3,
-            "type": "routing",
-            "built": built,
-            "updated": last_run,
-            "total": len(records),
-            "counts": counts,
-            "typeNames": TYPE_NAMES,
-            "groups": groups,
-            "shardCount": shard_count,
-            "shards": shards,
-            "dirShards": dir_shards,
-            "search": {"budgetBytes": args.search_budget,
-                       "maxShards": args.search_max_shards},
-            "note": "路由模式：查询时按目录只下载相关分片，不加载全量",
-        }
-    else:
-        shards = write_shards(records, out_dir, args.shard_size, args.shard_count or 16)
-        meta = {
-            "v": 2,
-            "types": TYPE_CODE,
-            "built": built,
-            "updated": last_run,
-            "total": len(records),
-            "counts": counts,
-            "typeNames": TYPE_NAMES,
-            "shards": shards,
-            "note": "shards[].url 可指向其他分支/仓库，实现多仓分片扩容",
-        }
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False, separators=(",", ":")), "utf-8"
-    )
+        mode = args.mode
+        if mode == "auto":
+            mode = "routing" if len(records) > 150000 else "compact"
+        built = time.strftime("%Y-%m-%d %H:%M:%S")
+        if mode == "routing":
+            shards, dir_shards, shard_count, groups = build_routing(records, out_dir, args)
+            meta = {
+                "v": 3,
+                "type": "routing",
+                "built": built,
+                "updated": last_run,
+                "total": len(records),
+                "counts": counts,
+                "typeNames": TYPE_NAMES,
+                "groups": groups,
+                "shardCount": shard_count,
+                "shards": shards,
+                "dirShards": dir_shards,
+                "search": {"budgetBytes": args.search_budget,
+                           "maxShards": args.search_max_shards},
+                "note": "路由模式：查询时按目录只下载相关分片，不加载全量",
+            }
+        else:
+            shards = write_shards(records, out_dir, args.shard_size, args.shard_count or 16)
+            meta = {
+                "v": 2,
+                "types": TYPE_CODE,
+                "built": built,
+                "updated": last_run,
+                "total": len(records),
+                "counts": counts,
+                "typeNames": TYPE_NAMES,
+                "shards": shards,
+                "note": "shards[].url 可指向其他分支/仓库，实现多仓分片扩容",
+            }
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, separators=(",", ":")), "utf-8"
+        )
 
-    print(f"索引完成：{len(records)} 条 -> {len(shards)} 个数据分片"
-          + (f" + {len(dir_shards)} 个目录分片" if mode == "routing" else "")
-          + f"，共 {sum(s['bytes'] for s in shards) / 1024:.0f} KB（gzip）")
-    print("各类型数量:", {TYPE_NAMES.get(k, k): v for k, v in counts.items()})
+        print(f"索引完成：{len(records)} 条 -> {len(shards)} 个数据分片"
+              + (f" + {len(dir_shards)} 个目录分片" if mode == "routing" else "")
+              + f"，共 {sum(s['bytes'] for s in shards) / 1024:.0f} KB（gzip）")
+        print("各类型数量:", {TYPE_NAMES.get(k, k): v for k, v in counts.items()})
+    finally:
+        if lock:
+            try:
+                lock.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

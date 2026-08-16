@@ -143,6 +143,17 @@ burst 模式参数：
 
 ## 全站漫游（roam 模式）
 
+## 按旧 av 号顺序扫描（avscan 模式）
+
+从 av1 开始**按顺序**逐个请求旧 B 站 av 号（可回溯 2009 年以来的早期稿件），自动续传：
+
+```powershell
+C:\Python312\python.exe -m crawler --mode avscan --aid-to 1000000 --workers 8 --interval 0.3
+```
+
+- 游标保存在 `data/state.json` 的 `avscan.next`，中断后重跑自动继续（`--aid-from` 可指定起点）
+- 死稿/已删除自动跳过；存活稿件以 `avN` 为 ID 入库，站点可直接搜 **`av2`、`av170001`** 精确命中（字母+数字的词只做精确匹配，不做前缀展开）
+
 想**不依赖具体种子、近似覆盖全站**地爬视频，用 roam：每个 worker 在“相关推荐”上随机游走，并以一定概率**跳转**到全站随机位置，避免永远困在热门/同主题小圈子里：
 
 ```powershell
@@ -207,6 +218,8 @@ powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1 -IntervalHour
 任务会运行 `python -m crawler --mode crawl --build ...`，工作目录为仓库根目录；加 `-Deploy` 后会在爬取完成后自动执行 `scripts\deploy.ps1 -Push`，实现“爬取→建索引→发布”全自动闭环。
 
 想用快抓模式做定时任务也可以：`-Mode burst -Popular 200 -Ranking 0,1,4,36 -Workers 6 -IntervalSeconds 0.6 -Deploy`（更多参数见 burst 模式一节）。
+
+> 当前未注册任何定时任务（如需自动运行，用 `scripts\register-task.ps1` 重新注册；或直接用 `--mode continuous` 在终端常驻）。
 
 ### 方式二：常驻进程
 
