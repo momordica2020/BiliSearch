@@ -1,0 +1,13 @@
+{
+  "buildArgs": ["--mode", "routing", "--groups", "8", "--shard-bases", "deploy.config.json"],
+  "bases": [
+    { "group": 0, "url": "", "branch": "" },
+    { "group": 1, "url": "https://cdn.jsdelivr.net/gh/momordica2020/BiliSearch@data1", "branch": "data1" },
+    { "group": 2, "url": "https://cdn.jsdelivr.net/gh/momordica2020/BiliSearch@data2", "branch": "data2" },
+    { "group": 3, "url": "https://cdn.jsdelivr.net/gh/momordica2020/BiliSearch@data3", "branch": "data3" },
+    { "group": 4, "url": "https://cdn.jsdelivr.net/gh/momordica2020/BiliSearch@data4", "branch": "data4" },
+    { "group": 5, "url": "https://cdn.jsdelivr.net/gh/momordica2020/BiliSearch@data5", "branch": "data5" },
+    { "group": 6, "url": "https://cdn.jsdelivr.net/gh/momordica2020/BiliSearch@data6", "branch": "data6" },
+    { "group": 7, "url": "https://cdn.jsdelivr.net/gh/momordica2020/BiliSearch@data7", "branch": "data7" }
+  ]
+}

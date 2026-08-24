@@ -5,6 +5,8 @@
 #>
 param([string]$Remote = "origin")
 $ErrorActionPreference = "Stop"
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $env:PATH = "C:\Program Files\Git\cmd;" + $env:PATH }
+
 $root = git rev-parse --show-toplevel
 if (-not $root) { throw "当前目录不在 git 仓库中" }
 $root = (Resolve-Path $root).Path
