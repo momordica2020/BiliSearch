@@ -9,6 +9,9 @@
     input: document.getElementById("q"),
     tabs: document.querySelectorAll(".tab"),
     sort: document.getElementById("sort"),
+    fTitle: document.getElementById("f-title"),
+    fAuthor: document.getElementById("f-author"),
+    fDesc: document.getElementById("f-desc"),
     status: document.getElementById("status"),
     progress: document.getElementById("progress"),
     progressbar: document.getElementById("progressbar"),
@@ -48,6 +51,13 @@
       writeHash();
       runSearch();
     });
+    [els.fTitle, els.fAuthor, els.fDesc].forEach((cb) => {
+      cb.addEventListener("change", () => {
+        state.page = 1;
+        writeHash();
+        runSearch();
+      });
+    });
     els.more.addEventListener("click", () => {
       state.page += 1;
       runSearch();
@@ -66,6 +76,12 @@
     state.type = p.get("t") || "all";
     state.sort = p.get("s") || "relevance";
     if (state.sort === "date") state.sort = "date_desc";  // 旧链接兼容
+    const f = p.get("f");
+    if (f) {
+      els.fTitle.checked = f.includes("t");
+      els.fAuthor.checked = f.includes("a");
+      els.fDesc.checked = f.includes("d");
+    }
     els.tabs.forEach((t) => t.classList.toggle("active", t.dataset.type === state.type));
     els.sort.value = state.sort;
   }
@@ -75,6 +91,10 @@
     if (state.q) p.set("q", state.q);
     if (state.type !== "all") p.set("t", state.type);
     if (state.sort !== "relevance") p.set("s", state.sort);
+    if (!(els.fTitle.checked && els.fAuthor.checked && els.fDesc.checked)) {
+      const f = (els.fTitle.checked ? "t" : "") + (els.fAuthor.checked ? "a" : "") + (els.fDesc.checked ? "d" : "");
+      if (f) p.set("f", f);
+    }
     history.replaceState(null, "", "#" + p.toString());
   }
 
@@ -129,8 +149,10 @@
     let res;
     try {
       showProgress(2, "正在检索…");
+      const fields = { title: els.fTitle.checked, author: els.fAuthor.checked, desc: els.fDesc.checked };
       res = await engine.search(state.q, {
         types,
+        fields,
         limit: state.page * state.pageSize,
         onProgress: (done, total, bytes) => {
           const pct = total ? Math.round((done / total) * 100) : 0;

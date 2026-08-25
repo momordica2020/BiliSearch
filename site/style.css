@@ -39,6 +39,9 @@ main { max-width: 760px; margin: 0 auto; padding: 18px 16px 60px; }
 }
 .searchbox input:focus { border-color: var(--accent); }
 .hint { color: var(--muted); font-size: 12px; margin: 6px 2px 0; }
+.fields { display: flex; align-items: center; gap: 14px; margin: 10px 2px 0; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+.fields label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.fields input { accent-color: var(--accent); }
 
 .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; align-items: center; }
 .tab {

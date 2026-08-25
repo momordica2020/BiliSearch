@@ -189,6 +189,7 @@
 
     search(query, opts = {}) {
       const pq = parseQuery(query);
+            const scopes = normalizeScopes(opts.fields);
       if (!pq.hasContent) return { total: 0, items: [] };
       const fuzzy = opts.fuzzy == null ? 1 : opts.fuzzy;
       const limit = opts.limit || 50;
@@ -243,7 +244,7 @@
       const rows = [];
       for (const [di, s] of scores) {
         const doc = this.docs[di];
-        if (matchDoc(doc, pq) <= 0) continue;
+        if (matchDoc(doc, pq, scopes) <= 0) continue;
         rows.push({ doc, score: s });
       }
       rows.sort((a, b) => b.score - a.score || (b.doc.p || 0) - (a.doc.p || 0));
@@ -256,9 +257,23 @@
     }
   }
 
-  function scoreDoc(d, tokens) {
+  function normalizeScopes(fields) {
+    /* 字段匹配范围：title=标题 / author=用户昵称 / desc=简介（缺省全部开启） */
+    return {
+      title: !fields || fields.title !== false,
+      author: !fields || fields.author !== false,
+      desc: !fields || fields.desc !== false,
+    };
+  }
+
+  function scoreDoc(d, tokens, scopes) {
+    const sc = scopes || {};
     let s = 0;
-    const fields = [[d.s, 2], [d.a, 1.5], [d.i, 1.5], [d.c, 1.2], [d.d, 1]];
+    const fields = [];
+    if (sc.title !== false) fields.push([d.s, 2]);
+    if (sc.author !== false) fields.push([d.a, 1.5]);
+    fields.push([d.i, 1.5], [d.c, 1.2]);   // ID/分类始终作为辅助匹配
+    if (sc.desc !== false) fields.push([d.d, 1]);
     for (const [text, w] of fields) {
       const seen = new Set();
       for (const t of tokenize(text)) {
@@ -269,8 +284,8 @@
     }
     for (const t of tokens) {
       if (t.length === 1 && CJK.test(t)) {
-        if ((d.s || "").includes(t)) s += 1.5;
-        if ((d.a || "").includes(t)) s += 1;
+        if (sc.title !== false && (d.s || "").includes(t)) s += 1.5;
+        if (sc.author !== false && (d.a || "").includes(t)) s += 1;
       }
     }
     return s;
@@ -318,28 +333,32 @@
     return out;
   }
 
-  function anyField(d, phrase) {
-    const low = phrase.toLowerCase();
-    return ((d.s || "") + "\u0001" + (d.a || "") + "\u0001" + (d.i || "") + "\u0001"
-            + (d.c || "") + "\u0001" + (d.d || ""))
-      .toLowerCase().includes(low);
+  function anyField(d, phrase, scopes) {
+    const sc = scopes || {};
+    const parts = [];
+    if (sc.title !== false) parts.push(d.s);
+    if (sc.author !== false) parts.push(d.a);
+    parts.push(d.i, d.c);   // ID/分类始终参与精确匹配
+    if (sc.desc !== false) parts.push(d.d);
+    return parts.filter(Boolean).join("\u0001").toLowerCase()
+      .includes(phrase.toLowerCase());
   }
 
-  function matchDoc(d, pq) {
+  function matchDoc(d, pq, scopes) {
     if (pq.up && !(d.a || "").toLowerCase().includes(pq.up.toLowerCase())) return 0;
     if (pq.upExclude && (d.a || "").toLowerCase().includes(pq.upExclude.toLowerCase())) return 0;
     if (pq.type && typeName(d.t) !== pq.type) return 0;
     if (pq.typeExclude && typeName(d.t) === pq.typeExclude) return 0;
-    for (const ex of pq.excludes) if (anyField(d, ex)) return 0;
-    for (const ex of pq.exactExcludes) if (anyField(d, ex)) return 0;
+    for (const ex of pq.excludes) if (anyField(d, ex, scopes)) return 0;
+    for (const ex of pq.exactExcludes) if (anyField(d, ex, scopes)) return 0;
     let s = 0;
     for (const ph of pq.exacts) {
-      if (!anyField(d, ph)) return 0;
+      if (!anyField(d, ph, scopes)) return 0;
       s += 2;
     }
     const tokens = new Set();
     for (const inc of pq.includes) for (const t of tokenize(inc)) tokens.add(t);
-    s += scoreDoc(d, tokens);
+    s += scoreDoc(d, tokens, scopes);
     if (!pq.includes.length && !pq.exacts.length && !tokens.size) s = 1;
     return s > 0 ? s : 0;
   }
@@ -438,6 +457,7 @@
 
     async search(query, opts = {}) {
       const pq = parseQuery(query);
+            const scopes = normalizeScopes(opts.fields);
       if (!pq.hasContent) {
         return { total: 0, items: [], partial: false, scanned: 0, candidates: 0, bytes: 0 };
       }
@@ -507,7 +527,7 @@
             let d;
             try { d = JSON.parse(t); } catch { continue; }
             if (!allowedType(d.t)) continue;
-            const sc = matchDoc(d, pq);
+            const sc = matchDoc(d, pq, scopes);
             if (sc > 0) results.push({ d, sc });
           }
         }
