@@ -72,7 +72,7 @@ Get-ChildItem -LiteralPath $wt -Force | Where-Object { $_.Name -ne ".git" } | Fo
 Copy-Item -Path (Join-Path $root "site\*") -Destination $wt -Recurse -Force
 
 Push-Location $wt
-git config http.postBuffer 524288000
+git config http.postBuffer 1073741824
 # 快照式发布：每次生成"单一根提交"替换 gh-pages 历史，
 # 避免 git 历史随索引增长无限膨胀（此前已因此涨到 1.7GB）
 if ((git branch --show-current) -ne "_snapshot") {

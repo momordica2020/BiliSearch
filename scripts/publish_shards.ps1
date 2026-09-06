@@ -43,7 +43,7 @@ foreach ($b in $cfg.bases) {
     Copy-Item -Path "$src\*" -Destination (Join-Path $wt "shards\g$group") -Recurse -Force
 
     Push-Location $wt
-    git config http.postBuffer 524288000
+    git config http.postBuffer 1073741824
     if ((git branch --show-current) -ne "_snapshot") {
         git branch -D _snapshot
         git checkout --orphan _snapshot
