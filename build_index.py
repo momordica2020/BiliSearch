@@ -326,13 +326,12 @@ def main():
         mode = args.mode
         if mode == "auto":
             mode = "routing" if len(records) > 150000 else "compact"
-        built = time.strftime("%Y-%m-%d %H:%M:%S")
-        if mode == "routing":
+
             shards, dir_shards, shard_count, groups = build_routing(records, out_dir, args)
             meta = {
                 "v": 3,
                 "type": "routing",
-                "built": built,
+                "built": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "updated": last_run,
                 "total": len(records),
                 "counts": counts,
@@ -350,7 +349,7 @@ def main():
             meta = {
                 "v": 2,
                 "types": TYPE_CODE,
-                "built": built,
+                "built": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "updated": last_run,
                 "total": len(records),
                 "counts": counts,

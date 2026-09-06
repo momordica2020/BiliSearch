@@ -10,3 +10,4 @@ site/data/
 .worktrees/
 .DS_Store
 data/*.log
+data/*.err
