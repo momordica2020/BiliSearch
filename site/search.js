@@ -46,7 +46,16 @@
     return prev[b.length];
   }
 
-  async function fetchText(url) {
+  function altUrl(url) {
+    /* jsdelivr 与 raw 互为备份：发布后 CDN 可能短暂 404，raw 立即生效；raw 限流时用 jsdelivr */
+    let m = url.match(/^https:\/\/cdn\.jsdelivr\.net\/gh\/([^@/]+\/[^@/]+)@([^/]+)\/(.+)$/);
+    if (m) return `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}`;
+    m = url.match(/^https:\/\/raw\.githubusercontent\.com\/([^/]+\/[^/]+)\/([^/]+)\/(.+)$/);
+    if (m) return `https://cdn.jsdelivr.net/gh/${m[1]}@${m[2]}/${m[3]}`;
+    return null;
+  }
+
+  async function fetchOne(url) {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status + " " + url);
     if (/\.gz($|\?)/.test(url)) {
@@ -60,6 +69,20 @@
       return await stream.text();
     }
     return await res.text();
+  }
+
+  async function fetchText(url) {
+    try {
+      return await fetchOne(url);
+    } catch (err) {
+      const alt = altUrl(url);
+      if (!alt) throw err;
+      try {
+        return await fetchOne(alt);
+      } catch (err2) {
+        throw err;   // 两个源都失败时报告原始错误
+      }
+    }
   }
 
   async function poolMap(items, limit, fn) {

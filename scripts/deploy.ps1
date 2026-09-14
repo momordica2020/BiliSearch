@@ -10,6 +10,7 @@ param(
     [string]$Remote = "origin",
     [switch]$Push,
     [switch]$SkipBuild,
+    [switch]$SkipShards,
     [string]$Worktree = ".worktrees/gh-pages"
 )
 $ErrorActionPreference = "Stop"
@@ -40,7 +41,7 @@ if ($SkipBuild) {
 }
 if (-not $SkipBuild -and $LASTEXITCODE -ne 0) { throw "build_index.py 失败" }
 
-if (Test-Path $cfgPath) {
+if ((Test-Path $cfgPath) -and (-not $SkipShards)) {
     Write-Host "==> 发布外部托管的分片组"
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts\publish_shards.ps1") -Remote $Remote
     foreach ($b in $cfg.bases) {
