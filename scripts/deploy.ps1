@@ -95,12 +95,24 @@ if ($Push) {
 }
 Pop-Location
 
-$dataSize = (Get-ChildItem (Join-Path $root "site\data") -Recurse -File | Measure-Object Length -Sum).Sum
-$sizeMB = [math]::Round($dataSize / 1MB)
+# 只统计真正进入 gh-pages 的部分（目录 + 本地分片组），外部分片组不算在 Pages 配额里
+$pagesBytes = 0
+foreach ($part in @("site\data\dir", "site\data\meta.json")) {
+    $p = Join-Path $root $part
+    if (Test-Path $p) {
+        $pagesBytes += (Get-ChildItem $p -Recurse -File | Measure-Object Length -Sum).Sum
+    }
+}
+$localShards = Join-Path $root "site\data\shards"
+if (Test-Path $localShards) {
+    $pagesBytes += (Get-ChildItem $localShards -Recurse -File | Measure-Object Length -Sum).Sum
+}
+$sizeMB = [math]::Round($pagesBytes / 1MB)
+Write-Host "gh-pages 将发布约 ${sizeMB}MB（目录 + 本地分片组）"
 if ($sizeMB -gt 900) {
-    Write-Warning "索引已达 ${sizeMB}MB，接近 GitHub Pages 1GB 软上限！请考虑 --desc-len 0 或多仓库分片。"
-} elseif ($sizeMB -gt 300) {
-    Write-Warning "索引 ${sizeMB}MB，推送体积较大，建议提高 --sync-minutes 或使用 --desc-len 0。"
+    Write-Warning "gh-pages 体积 ${sizeMB}MB，接近 GitHub Pages 1GB 软上限！请考虑 --desc-len 0、提高 --recs-per-shard 或多仓库分片。"
+} elseif ($sizeMB -gt 600) {
+    Write-Warning "gh-pages 体积 ${sizeMB}MB，建议提高 --recs-per-shard 以缩小目录分片。"
 }
 
 Write-Host "完成。站点目录：$wt"
