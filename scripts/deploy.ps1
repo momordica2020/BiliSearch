@@ -30,10 +30,13 @@ if (-not $wt.StartsWith($root + $sep)) {
 
 Write-Host "==> 构建索引"
 $cfgPath = Join-Path $root "deploy.config.json"
+$cfg = $null
+if (Test-Path $cfgPath) {
+    $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+}
 if ($SkipBuild) {
     Write-Host "==> 跳过构建（使用现有 site/data）"
-} elseif (Test-Path $cfgPath) {
-    $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+} elseif ($cfg) {
     Write-Host "==> 使用 deploy.config.json 构建参数"
     & python build_index.py $cfg.buildArgs
 } else {
@@ -41,9 +44,12 @@ if ($SkipBuild) {
 }
 if (-not $SkipBuild -and $LASTEXITCODE -ne 0) { throw "build_index.py 失败" }
 
-if ((Test-Path $cfgPath) -and (-not $SkipShards)) {
+if ($cfg -and (-not $SkipShards)) {
     Write-Host "==> 发布外部托管的分片组"
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts\publish_shards.ps1") -Remote $Remote
+}
+if ($cfg) {
+    # 外部分片组不进入 gh-pages（无论是否重推分片都要剔除）
     foreach ($b in $cfg.bases) {
         if (-not $b.url) { continue }
         $gdir = Join-Path $root "site\data\shards\g$($b.group)"
@@ -66,11 +72,33 @@ if (-not (Test-Path (Join-Path $wt ".git"))) {
     }
 }
 
+# 发布前检查构建锁：若另一个 build_index.py 正在运行，站点数据可能不完整，直接中止
+$lockPath = Join-Path $root "site\data\.build.lock"
+if (Test-Path $lockPath) {
+    try {
+        $fh = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        $fh.Close()
+    } catch {
+        throw "检测到另一个构建正在进行（site/data/.build.lock 被占用），已中止发布以避免推送不完整索引"
+    }
+}
+$metaCheck = Join-Path $root "site\data\meta.json"
+if (-not (Test-Path $metaCheck)) {
+    throw "site/data/meta.json 不存在，请先运行 build_index.py"
+}
+
 Write-Host "==> 同步 site/ 到工作树"
 Get-ChildItem -LiteralPath $wt -Force | Where-Object { $_.Name -ne ".git" } | ForEach-Object {
     Remove-Item -LiteralPath $_.FullName -Recurse -Force
 }
-Copy-Item -Path (Join-Path $root "site\*") -Destination $wt -Recurse -Force
+# 排除构建临时文件（.build.lock / .tmp_post），避免占用或把临时文件带进站点
+Get-ChildItem -LiteralPath (Join-Path $root "site") -Force | Where-Object { $_.Name -ne "data" } | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $wt -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path (Join-Path $wt "data") | Out-Null
+Get-ChildItem -LiteralPath (Join-Path $root "site\data") -Force | Where-Object { $_.Name -notin @(".build.lock", ".tmp_post") } | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $wt "data") -Recurse -Force
+}
 
 Push-Location $wt
 git config http.postBuffer 1073741824
